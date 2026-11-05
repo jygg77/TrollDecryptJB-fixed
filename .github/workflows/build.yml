@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-linux:
+  build:
+    name: Build Packages (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
@@ -39,53 +40,33 @@ jobs:
           cp -r ~/sdks-temp/*.sdk ~/theos/sdks/ || true
           rm -rf ~/sdks-temp
 
-      - name: Compile Package
+      - name: Compile RootHide Package
         run: |
           export THEOS=$HOME/theos
           export THEOS_PACKAGE_SCHEME=roothide
           chmod +x flexdecrypt_bin dlopentool.c || true
           make clean
           make package FINALPACKAGE=1
+          mkdir -p out-roothide
+          cp packages/*.deb out-roothide/
 
-      - name: Upload Linux .deb Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: TrollDecryptJB-roothide-linux
-          path: packages/*.deb
-
-  build-macos:
-    runs-on: macos-15
-    steps:
-      - name: Checkout Source
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
+      - name: Compile Rootless Package
         run: |
-          brew install ldid dpkg
-
-      - name: Setup Theos
-        run: |
-          git clone --recursive https://github.com/RootHide/Theos.git ~/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-
-      - name: Setup iOS SDK
-        run: |
-          git clone --quiet --depth=1 https://github.com/theos/sdks.git ~/sdks-temp
-          mkdir -p ~/theos/sdks
-          cp -r ~/sdks-temp/*.sdk ~/theos/sdks/ || true
-          rm -rf ~/sdks-temp
-
-      - name: Compile Package
-        run: |
-          export THEOS_PACKAGE_SCHEME=roothide
-          chmod +x flexdecrypt_bin dlopentool.c || true
+          export THEOS=$HOME/theos
+          export THEOS_PACKAGE_SCHEME=rootless
           make clean
           make package FINALPACKAGE=1
+          mkdir -p out-rootless
+          cp packages/*.deb out-rootless/
 
-      - name: Upload macOS .deb Artifact
+      - name: Upload RootHide .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollDecryptJB-roothide-macos
-          path: packages/*.deb
+          name: TrollDecryptJB-roothide
+          path: out-roothide/*.deb
+
+      - name: Upload Rootless .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollDecryptJB-rootless
+          path: out-rootless/*.deb
