@@ -29,12 +29,62 @@ static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
     return nil;
 }
 
+BOOL decryptMachOFile(NSString *filePath, NSString *outputPath);
+BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath);
+NSArray *findAllMachOFiles(NSString *appPath);
+
 UIWindow *alertWindow = NULL;
 UIWindow *kw = NULL;
 UIViewController *root = NULL;
 UIAlertController *alertController = NULL;
 UIAlertController *doneController = NULL;
 UIAlertController *errorController = NULL;
+
+static void dismissAndCleanup(UIAlertController *alertToDismiss, void (^completion)(void)) {
+    if (alertToDismiss && alertToDismiss.presentingViewController) {
+        [alertToDismiss dismissViewControllerAnimated:YES completion:^{
+            if (completion) completion();
+        }];
+    } else {
+        if (completion) completion();
+    }
+}
+
+static void showResultAlert(NSString *title, NSString *message, NSString *filePath, BOOL success) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dismissAndCleanup(alertController, ^{
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                message:message
+                preferredStyle:UIAlertControllerStyleAlert];
+
+            UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                if (kw) {
+                    [kw removeFromSuperview];
+                    kw.hidden = YES;
+                    kw = nil;
+                    alertWindow = nil;
+                }
+            }];
+            [alert addAction:okAction];
+
+            if (success && filePath && [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"filza://"]]) {
+                UIAlertAction *openAction = [UIAlertAction actionWithTitle:@"Open in Filza" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    if (kw) {
+                        [kw removeFromSuperview];
+                        kw.hidden = YES;
+                        kw = nil;
+                        alertWindow = nil;
+                    }
+                    NSString *urlString = [NSString stringWithFormat:@"filza://view%@", filePath];
+                    [[UIApplication sharedApplication] openURL:[NSURL URLWithString:urlString] options:@{} completionHandler:nil];
+                }];
+                [alert addAction:openAction];
+            }
+
+            [root presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
 
 NSArray *appList(void) {
     NSMutableArray *apps = [NSMutableArray array];
@@ -186,19 +236,9 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
         }
         
         if (result != 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [alertController dismissViewControllerAnimated:NO completion:nil];
-                errorController = [UIAlertController alertControllerWithTitle:@"FlexDecrypt Error" 
-                    message:[NSString stringWithFormat:@"FlexDecrypt failed with error %d. stderr: %@", result, stdErr] 
-                    preferredStyle:UIAlertControllerStyleAlert];
-                UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    [errorController dismissViewControllerAnimated:NO completion:nil];
-                    [kw removeFromSuperview];
-                    kw.hidden = YES;
-                }];
-                [errorController addAction:okAction];
-                [root presentViewController:errorController animated:YES completion:nil];
-            });
+            NSLog(@"[trolldecrypt] flexdecrypt failed: %d, stderr: %@", result, stdErr);
+            NSString *errMessage = (stdErr && stdErr.length > 0) ? stdErr : [NSString stringWithFormat:@"FlexDecrypt returned exit code %d", result];
+            showResultAlert(@"FlexDecrypt Error", errMessage, nil, NO);
             return;
         }
         
@@ -206,19 +246,8 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
         NSString *decryptedPath = [NSString stringWithFormat:@"/tmp/%@", binaryName];
         
         if (![fm fileExistsAtPath:decryptedPath]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [alertController dismissViewControllerAnimated:NO completion:nil];
-                errorController = [UIAlertController alertControllerWithTitle:@"FlexDecrypt Error" 
-                    message:[NSString stringWithFormat:@"Decrypted file not found at: %@", decryptedPath] 
-                    preferredStyle:UIAlertControllerStyleAlert];
-                UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    [errorController dismissViewControllerAnimated:NO completion:nil];
-                    [kw removeFromSuperview];
-                    kw.hidden = YES;
-                }];
-                [errorController addAction:okAction];
-                [root presentViewController:errorController animated:YES completion:nil];
-            });
+            NSLog(@"[trolldecrypt] decrypted file not found at: %@", decryptedPath);
+            showResultAlert(@"FlexDecrypt Error", [NSString stringWithFormat:@"Decrypted file not found at: %@", decryptedPath], nil, NO);
             return;
         }
         
@@ -240,53 +269,12 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
         NSError *copyError;
         if ([fm copyItemAtPath:decryptedPath toPath:outputPath error:&copyError]) {
             NSLog(@"[trolldecrypt] Successfully saved decrypted binary: %@", outputPath);
-            
-            // Show success message after dismiss completes to avoid race conditions
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [alertController dismissViewControllerAnimated:YES completion:^{
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        UIAlertController *successController = [UIAlertController alertControllerWithTitle:@"Decryption Complete!"
-                            message:[NSString stringWithFormat:@"Decrypted binary saved to:\n%@", outputPath]
-                            preferredStyle:UIAlertControllerStyleAlert];
-                        
-                        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                            [kw removeFromSuperview];
-                            kw.hidden = YES;
-                        }];
-                        [successController addAction:okAction];
-                        
-                        // Add Filza button if available
-                        if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"filza://"]]) {
-                            UIAlertAction *filzaAction = [UIAlertAction actionWithTitle:@"Open in Filza" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                                [kw removeFromSuperview];
-                                kw.hidden = YES;
-                                
-                                NSString *filzaURL = [NSString stringWithFormat:@"filza://view%@", outputPath];
-                                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:filzaURL] options:@{} completionHandler:nil];
-                            }];
-                            [successController addAction:filzaAction];
-                        }
-                        
-                        [root presentViewController:successController animated:YES completion:nil];
-                    });
-                }];
-            });
+            [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
+            [fm removeItemAtPath:decryptedPath error:nil];
+            showResultAlert(@"Decryption Complete!", [NSString stringWithFormat:@"Decrypted binary saved to:\n%@", outputPath], outputPath, YES);
         } else {
             NSLog(@"[trolldecrypt] Failed to copy decrypted file: %@", copyError.localizedDescription);
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [alertController dismissViewControllerAnimated:NO completion:nil];
-                errorController = [UIAlertController alertControllerWithTitle:@"Copy Error" 
-                    message:[NSString stringWithFormat:@"Failed to save decrypted file: %@", copyError.localizedDescription] 
-                    preferredStyle:UIAlertControllerStyleAlert];
-                UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    [errorController dismissViewControllerAnimated:NO completion:nil];
-                    [kw removeFromSuperview];
-                    kw.hidden = YES;
-                }];
-                [errorController addAction:okAction];
-                [root presentViewController:errorController animated:YES completion:nil];
-            });
+            showResultAlert(@"Copy Error", [NSString stringWithFormat:@"Failed to save decrypted file: %@", copyError.localizedDescription], nil, NO);
         }
     });
 }
@@ -685,132 +673,84 @@ void decryptAllMachOInApp(NSDictionary *app) {
     
     NSLog(@"[trolldecrypt] Starting comprehensive decryption for %@", name);
     
-    // Get the app bundle path
-    LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-    if (!appProxy) {
-        NSLog(@"[trolldecrypt] Failed to get app proxy for %@", bundleID);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [alertController dismissViewControllerAnimated:NO completion:nil];
-            UIAlertController *errorController = [UIAlertController alertControllerWithTitle:@"Error" 
-                message:[NSString stringWithFormat:@"Failed to get app proxy for %@", bundleID] 
-                preferredStyle:UIAlertControllerStyleAlert];
-            UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                [kw removeFromSuperview];
-                kw.hidden = YES;
-            }];
-            [errorController addAction:okAction];
-            [root presentViewController:errorController animated:YES completion:nil];
-        });
-        return;
-    }
-    
-    NSString *appPath = [appProxy bundleURL].path;
-    if (!appPath) {
-        NSLog(@"[trolldecrypt] Failed to get app path for %@", bundleID);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [alertController dismissViewControllerAnimated:NO completion:nil];
-            UIAlertController *errorController = [UIAlertController alertControllerWithTitle:@"Error" 
-                message:[NSString stringWithFormat:@"Failed to get app path for %@", bundleID] 
-                preferredStyle:UIAlertControllerStyleAlert];
-            UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                [kw removeFromSuperview];
-                kw.hidden = YES;
-            }];
-            [errorController addAction:okAction];
-            [root presentViewController:errorController animated:YES completion:nil];
-        });
-        return;
-    }
-    
-    NSLog(@"[trolldecrypt] App path: %@", appPath);
-    
-    // Find all mach-o files in the app
-    NSArray *machOFiles = findAllMachOFiles(appPath);
-    NSLog(@"[trolldecrypt] Found %lu mach-o files", (unsigned long)machOFiles.count);
-    
-    if (machOFiles.count == 0) {
-        NSLog(@"[trolldecrypt] No mach-o files found in %@", appPath);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [alertController dismissViewControllerAnimated:NO completion:nil];
-            UIAlertController *errorController = [UIAlertController alertControllerWithTitle:@"Error" 
-                message:[NSString stringWithFormat:@"No mach-o files found in %@", appPath] 
-                preferredStyle:UIAlertControllerStyleAlert];
-            UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                [kw removeFromSuperview];
-                kw.hidden = YES;
-            }];
-            [errorController addAction:okAction];
-            [root presentViewController:errorController animated:YES completion:nil];
-        });
-        return;
-    }
-    
-    // Create temporary working directory
-    NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_decrypt_work", name]];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm removeItemAtPath:tempDir error:nil]; // Clean up any existing temp dir
-    [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
-    
-    // Copy the entire app bundle to temp directory
-    NSString *tempAppPath = [tempDir stringByAppendingPathComponent:[appPath lastPathComponent]];
-    NSError *copyError;
-    if (![fm copyItemAtPath:appPath toPath:tempAppPath error:&copyError]) {
-        NSLog(@"[trolldecrypt] Failed to copy app bundle: %@", copyError.localizedDescription);
-        return;
-    }
-    
-    NSLog(@"[trolldecrypt] Copied app bundle to: %@", tempAppPath);
-    
-    // Decrypt each mach-o file and replace it in the temp app bundle
-    for (NSString *machOFile in machOFiles) {
-        NSString *relativePath = [machOFile substringFromIndex:appPath.length + 1];
-        NSString *tempMachOPath = [tempAppPath stringByAppendingPathComponent:relativePath];
+    // Dispatch heavy operations to background thread to avoid freezing UI
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Get the app bundle path
+        LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+        if (!appProxy) {
+            NSLog(@"[trolldecrypt] Failed to get app proxy for %@", bundleID);
+            showResultAlert(@"Error", [NSString stringWithFormat:@"Failed to get app proxy for %@", bundleID], nil, NO);
+            return;
+        }
         
-        NSLog(@"[trolldecrypt] Decrypting: %@", relativePath);
+        NSString *appPath = [appProxy bundleURL].path;
+        if (!appPath) {
+            NSLog(@"[trolldecrypt] Failed to get app path for %@", bundleID);
+            showResultAlert(@"Error", [NSString stringWithFormat:@"Failed to get app path for %@", bundleID], nil, NO);
+            return;
+        }
         
-        // Decrypt the file directly to the temp location (replacing original)
-        decryptMachOFile(machOFile, tempMachOPath);
-    }
-    
-    // Create IPA from the modified app bundle
-    NSString *ipaPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@_decrypted.ipa", name, version]];
-    createIPAFromAppBundle(tempAppPath, ipaPath);
-    
-    // Clean up temp directory
-    [fm removeItemAtPath:tempDir error:nil];
-    
-    NSLog(@"[trolldecrypt] Comprehensive decryption completed for %@", name);
-    NSLog(@"[trolldecrypt] IPA created at: %@", ipaPath);
-    
-    // Show success message after dismiss completes to avoid race conditions
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [alertController dismissViewControllerAnimated:YES completion:^{
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                UIAlertController *successController = [UIAlertController alertControllerWithTitle:@"Decryption Complete!"
-                    message:[NSString stringWithFormat:@"IPA created successfully:\n%@", ipaPath]
-                    preferredStyle:UIAlertControllerStyleAlert];
-                
-                UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Ok" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    [kw removeFromSuperview];
-                    kw.hidden = YES;
-                }];
-                [successController addAction:okAction];
-                
-                // Add Filza button if available
-                if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"filza://"]]) {
-                    UIAlertAction *filzaAction = [UIAlertAction actionWithTitle:@"Open in Filza" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                        [kw removeFromSuperview];
-                        kw.hidden = YES;
-                        
-                        NSString *filzaURL = [NSString stringWithFormat:@"filza://view%@", ipaPath];
-                        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:filzaURL] options:@{} completionHandler:nil];
-                    }];
-                    [successController addAction:filzaAction];
-                }
-                
-                [root presentViewController:successController animated:YES completion:nil];
-            });
-        }];
+        NSLog(@"[trolldecrypt] App path: %@", appPath);
+        
+        // Find all mach-o files in the app
+        NSArray *machOFiles = findAllMachOFiles(appPath);
+        NSLog(@"[trolldecrypt] Found %lu mach-o files", (unsigned long)machOFiles.count);
+        
+        if (machOFiles.count == 0) {
+            NSLog(@"[trolldecrypt] No mach-o files found in %@", appPath);
+            showResultAlert(@"Error", [NSString stringWithFormat:@"No mach-o files found in %@", appPath], nil, NO);
+            return;
+        }
+        
+        // Create temporary working directory
+        NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_decrypt_work", name]];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm removeItemAtPath:tempDir error:nil];
+        [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
+        
+        // Copy the entire app bundle to temp directory
+        NSString *tempAppPath = [tempDir stringByAppendingPathComponent:[appPath lastPathComponent]];
+        NSError *copyError;
+        if (![fm copyItemAtPath:appPath toPath:tempAppPath error:&copyError]) {
+            NSLog(@"[trolldecrypt] Failed to copy app bundle: %@", copyError.localizedDescription);
+            [fm removeItemAtPath:tempDir error:nil];
+            showResultAlert(@"Error", [NSString stringWithFormat:@"Failed to copy app bundle: %@", copyError.localizedDescription], nil, NO);
+            return;
+        }
+        
+        NSLog(@"[trolldecrypt] Copied app bundle to: %@", tempAppPath);
+        
+        // Decrypt each mach-o file and replace it in the temp app bundle
+        int failedCount = 0;
+        for (NSString *machOFile in machOFiles) {
+            NSString *relativePath = [machOFile substringFromIndex:appPath.length + 1];
+            NSString *tempMachOPath = [tempAppPath stringByAppendingPathComponent:relativePath];
+            
+            NSLog(@"[trolldecrypt] Decrypting: %@", relativePath);
+            if (!decryptMachOFile(machOFile, tempMachOPath)) {
+                failedCount++;
+            }
+        }
+        
+        // Create IPA from the modified app bundle
+        NSString *ipaPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@_decrypted.ipa", name, version]];
+        BOOL ipaSuccess = createIPAFromAppBundle(tempAppPath, ipaPath);
+        
+        // Clean up temp directory
+        [fm removeItemAtPath:tempDir error:nil];
+        
+        if (ipaSuccess && [fm fileExistsAtPath:ipaPath]) {
+            NSLog(@"[trolldecrypt] Comprehensive decryption completed for %@", name);
+            NSLog(@"[trolldecrypt] IPA created at: %@", ipaPath);
+            NSString *msg = [NSString stringWithFormat:@"IPA file saved to:\n%@\n\n(Processed %lu Mach-O files)", ipaPath, (unsigned long)machOFiles.count];
+            if (failedCount > 0) {
+                msg = [NSString stringWithFormat:@"IPA created with warnings:\n%@\n\n(%d of %lu binaries failed decryption)", ipaPath, failedCount, (unsigned long)machOFiles.count];
+            }
+            showResultAlert(@"Decryption Complete!", msg, ipaPath, YES);
+        } else {
+            NSLog(@"[trolldecrypt] Failed to create IPA file at: %@", ipaPath);
+            showResultAlert(@"Packaging Error", @"Failed to create IPA file archive.", nil, NO);
+        }
     });
 }
 
@@ -908,30 +848,17 @@ BOOL isMachOFile(NSString *filePath) {
     return NO;
 }
 
-void decryptMachOFile(NSString *filePath, NSString *outputPath) {
+BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
     NSLog(@"[trolldecrypt] Decrypting mach-o file: %@", filePath);
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
     // First, run dlopen on the binary to load its dependencies
-    NSLog(@"[trolldecrypt] Running dlopen on %@ to load dependencies", filePath);
     NSString *dlopenPath = resolveToolPath(@"dlopentool", @"/usr/local/bin/dlopentool");
-    
     if (dlopenPath && [fm fileExistsAtPath:dlopenPath]) {
         NSString *dlopenStdOut = nil;
         NSString *dlopenStdErr = nil;
-        int dlopenResult = spawnRoot(dlopenPath, @[filePath], &dlopenStdOut, &dlopenStdErr);
-        
-        if (dlopenResult == 0) {
-            NSLog(@"[trolldecrypt] dlopen completed successfully for %@", filePath);
-            if (dlopenStdOut && dlopenStdOut.length > 0) {
-                NSLog(@"[trolldecrypt] dlopen stdout: %@", dlopenStdOut);
-            }
-        } else {
-            NSLog(@"[trolldecrypt] dlopen failed for %@ (exit code: %d): %@", filePath, dlopenResult, dlopenStdErr);
-        }
-    } else {
-        NSLog(@"[trolldecrypt] dlopentool not found, skipping dlopen step");
+        spawnRoot(dlopenPath, @[filePath], &dlopenStdOut, &dlopenStdErr);
     }
     
     // Use flexdecrypt to decrypt the file
@@ -946,41 +873,36 @@ void decryptMachOFile(NSString *filePath, NSString *outputPath) {
     int result = spawnRoot(flexdecryptPath, @[filePath], &stdOut, &stdErr);
     
     if (result != 0) {
-        NSLog(@"[trolldecrypt] FlexDecrypt failed for %@: %@", filePath, stdErr);
-        return;
+        NSLog(@"[trolldecrypt] FlexDecrypt failed for %@ (code %d): %@", filePath, result, stdErr);
+        return NO;
     }
     
     // Find the decrypted file (usually in /tmp with the same name)
     NSString *decryptedPath = [NSString stringWithFormat:@"/tmp/%@", [filePath lastPathComponent]];
     
     if ([fm fileExistsAtPath:decryptedPath]) {
-        // Create output directory if it doesn't exist
         NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
         [fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:nil];
-        
-        // Remove existing file if it exists
         [fm removeItemAtPath:outputPath error:nil];
         
-        // Copy decrypted file to output location
         NSError *error;
         if ([fm copyItemAtPath:decryptedPath toPath:outputPath error:&error]) {
             NSLog(@"[trolldecrypt] Successfully decrypted: %@ -> %@", filePath, outputPath);
-            
-            // Set proper permissions (executable)
-            NSDictionary *attributes = @{NSFilePosixPermissions: @0755};
-            [fm setAttributes:attributes ofItemAtPath:outputPath error:nil];
+            [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
+            [fm removeItemAtPath:decryptedPath error:nil];
+            return YES;
         } else {
             NSLog(@"[trolldecrypt] Failed to copy decrypted file: %@", error.localizedDescription);
+            [fm removeItemAtPath:decryptedPath error:nil];
+            return NO;
         }
-        
-        // Clean up temp file
-        [fm removeItemAtPath:decryptedPath error:nil];
     } else {
         NSLog(@"[trolldecrypt] Decrypted file not found at: %@", decryptedPath);
+        return NO;
     }
 }
 
-void createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
+BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     NSLog(@"[trolldecrypt] Creating IPA from app bundle: %@", appBundlePath);
     
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -988,7 +910,7 @@ void createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     // Create Payload directory in the same directory as the app bundle
     NSString *workDir = [appBundlePath stringByDeletingLastPathComponent];
     NSString *payloadDir = [workDir stringByAppendingPathComponent:@"Payload"];
-    [fm removeItemAtPath:payloadDir error:nil]; // Clean up any existing payload dir
+    [fm removeItemAtPath:payloadDir error:nil];
     [fm createDirectoryAtPath:payloadDir withIntermediateDirectories:YES attributes:nil error:nil];
     
     // Copy app bundle to Payload directory
@@ -996,7 +918,8 @@ void createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     NSError *copyError;
     if (![fm copyItemAtPath:appBundlePath toPath:payloadAppPath error:&copyError]) {
         NSLog(@"[trolldecrypt] Failed to copy app bundle to Payload: %@", copyError.localizedDescription);
-        return;
+        [fm removeItemAtPath:payloadDir error:nil];
+        return NO;
     }
     
     // Verify Info.plist in payload app
@@ -1004,36 +927,43 @@ void createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     if (![fm fileExistsAtPath:checkPlist]) {
         NSLog(@"[trolldecrypt] Failed to create IPA: Info.plist missing in app bundle");
         [fm removeItemAtPath:payloadDir error:nil];
-        return;
+        return NO;
     }
 
-    // Change to the working directory and create IPA
-    NSString *originalDir = [[NSFileManager defaultManager] currentDirectoryPath];
-    [[NSFileManager defaultManager] changeCurrentDirectoryPath:workDir];
-    
-    // Create IPA using zip
-    NSString *zipPath = resolveToolPath(@"zip", @"/usr/bin/zip");
-    if (!zipPath) {
-        NSLog(@"[trolldecrypt] zip tool not found");
-        [[NSFileManager defaultManager] changeCurrentDirectoryPath:originalDir];
-        [fm removeItemAtPath:payloadDir error:nil];
-        return;
+    // Set POSIX permissions 0755 on executables inside payloadAppPath
+    NSArray *dirContents = [fm contentsOfDirectoryAtPath:payloadAppPath error:nil];
+    for (NSString *item in dirContents) {
+        NSString *fullItemPath = [payloadAppPath stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:fullItemPath isDirectory:&isDir] && !isDir) {
+            if ([fm isExecutableFileAtPath:fullItemPath]) {
+                [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:fullItemPath error:nil];
+            }
+        }
     }
 
-    NSString *stdOut = nil;
-    NSString *stdErr = nil;
-    int result = spawnRoot(zipPath, @[@"-r", ipaPath, @"Payload"], &stdOut, &stdErr);
-    
-    // Restore original directory
-    [[NSFileManager defaultManager] changeCurrentDirectoryPath:originalDir];
-    
-    if (result != 0) {
-        NSLog(@"[trolldecrypt] Failed to create IPA: %@", stdErr);
-        [fm removeItemAtPath:ipaPath error:nil];
-    } else {
-        NSLog(@"[trolldecrypt] IPA created successfully at: %@", ipaPath);
-    }
-    
+    // Remove existing destination IPA if any
+    [fm removeItemAtPath:ipaPath error:nil];
+
+    // Create IPA using SSZipArchive directly (no external /usr/bin/zip dependency!)
+    NSLog(@"[trolldecrypt] Creating IPA file using SSZipArchive: %@", ipaPath);
+    BOOL zipSuccess = [SSZipArchive createZipFileAtPath:ipaPath
+                                withContentsOfDirectory:workDir
+                                keepParentDirectory:NO
+                                compressionLevel:1
+                                password:nil
+                                AES:NO
+                                progressHandler:nil];
+
     // Clean up Payload directory
     [fm removeItemAtPath:payloadDir error:nil];
+
+    if (!zipSuccess || ![fm fileExistsAtPath:ipaPath]) {
+        NSLog(@"[trolldecrypt] Failed to create IPA with SSZipArchive");
+        [fm removeItemAtPath:ipaPath error:nil];
+        return NO;
+    }
+
+    NSLog(@"[trolldecrypt] IPA created successfully at: %@", ipaPath);
+    return YES;
 }

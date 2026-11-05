@@ -106,7 +106,6 @@ static NSString* readEntireFD(int fd)
     {
         [data appendBytes:buf length:bytesRead];
     }
-    close(fd);
     if (data.length == 0) return @"";
     NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!str) {
@@ -156,7 +155,10 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 	if (stdErr)
 	{
 		if (pipe(outErr) == 0) {
+            fcntl(outErr[0], F_SETFD, FD_CLOEXEC);
+            fcntl(outErr[1], F_SETFD, FD_CLOEXEC);
             posix_spawn_file_actions_adddup2(&action, outErr[1], STDERR_FILENO);
+            posix_spawn_file_actions_addclose(&action, outErr[1]);
             posix_spawn_file_actions_addclose(&action, outErr[0]);
         }
 	}
@@ -165,7 +167,10 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 	if (stdOut)
 	{
 		if (pipe(out) == 0) {
+            fcntl(out[0], F_SETFD, FD_CLOEXEC);
+            fcntl(out[1], F_SETFD, FD_CLOEXEC);
             posix_spawn_file_actions_adddup2(&action, out[1], STDOUT_FILENO);
+            posix_spawn_file_actions_addclose(&action, out[1]);
             posix_spawn_file_actions_addclose(&action, out[0]);
         }
 	}
@@ -216,16 +221,37 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
         });
     }
 
-	do
-	{
-		if (waitpid(task_pid, &status, 0) == -1) {
-			if (errno == EINTR) continue;
-			perror("waitpid");
-			return -222;
-		}
-	} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+    // Wait for process with a safety timeout (30 seconds)
+    NSTimeInterval startTime = [NSDate timeIntervalSinceReferenceDate];
+    while (YES)
+    {
+        pid_t w = waitpid(task_pid, &status, WNOHANG);
+        if (w == task_pid) {
+            break;
+        } else if (w == 0) {
+            if ([NSDate timeIntervalSinceReferenceDate] - startTime > 30.0) {
+                NSLog(@"[spawnRoot] Process %d timed out after 30s, sending SIGKILL", task_pid);
+                kill(task_pid, SIGKILL);
+                waitpid(task_pid, &status, 0);
+                break;
+            }
+            usleep(20000); // 20ms
+        } else if (w == -1) {
+            if (errno == EINTR) continue;
+            perror("waitpid");
+            break;
+        }
+    }
 
-    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    // Wait up to 2 seconds for pipe reading to finish
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+
+    if (stdOut && out[0] != -1) {
+        close(out[0]);
+    }
+    if (stdErr && outErr[0] != -1) {
+        close(outErr[0]);
+    }
 
     if (stdOut) {
         *stdOut = capturedOut;
