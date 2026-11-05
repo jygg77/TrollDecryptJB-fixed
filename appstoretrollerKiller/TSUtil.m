@@ -203,14 +203,16 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
     __block NSString *capturedErr = @"";
 
     if (stdOut && out[0] != -1) {
+        int outReadFd = out[0];
         dispatch_group_async(group, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            capturedOut = readEntireFD(out[0]);
+            capturedOut = readEntireFD(outReadFd);
         });
     }
 
     if (stdErr && outErr[0] != -1) {
+        int errReadFd = outErr[0];
         dispatch_group_async(group, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            capturedErr = readEntireFD(outErr[0]);
+            capturedErr = readEntireFD(errReadFd);
         });
     }
 
