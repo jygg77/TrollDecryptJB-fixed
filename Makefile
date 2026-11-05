@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = TrollDecrypt
 TWEAK_NAME = TrollDecryptHook
-TOOL_NAME = TDDaemonKiller
+TOOL_NAME = TDDaemonKiller dlopentool
 
 # Application files
 TrollDecrypt_FILES = SSZipArchive/minizip/unzip.c SSZipArchive/minizip/crypt.c SSZipArchive/minizip/ioapi_buf.c SSZipArchive/minizip/ioapi_mem.c SSZipArchive/minizip/ioapi.c SSZipArchive/minizip/minishared.c SSZipArchive/minizip/zip.c SSZipArchive/minizip/aes/aes_ni.c SSZipArchive/minizip/aes/aescrypt.c SSZipArchive/minizip/aes/aeskey.c SSZipArchive/minizip/aes/aestab.c SSZipArchive/minizip/aes/fileenc.c SSZipArchive/minizip/aes/hmac.c SSZipArchive/minizip/aes/prng.c SSZipArchive/minizip/aes/pwd2key.c SSZipArchive/minizip/aes/sha1.c SSZipArchive/SSZipArchive.m
@@ -30,11 +30,10 @@ TDDaemonKiller_CODESIGN_FLAGS = -SappstoretrollerKiller/entitlements.plist
 TDDaemonKiller_INSTALL_PATH = /usr/local/bin
 
 # dlopen tool
-DLOPEN_TOOL_NAME = dlopentool
-DLOPEN_TOOL_FILES = dlopentool.c
-DLOPEN_TOOL_INSTALL_PATH = /usr/local/bin
+dlopentool_FILES = dlopentool.c
+dlopentool_CFLAGS = -Wno-error
+dlopentool_INSTALL_PATH = /usr/local/bin
 
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/tool.mk
-

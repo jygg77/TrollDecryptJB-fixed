@@ -617,96 +617,24 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
             [root presentViewController:alertController animated:YES completion:nil];
         });
 
-        // Execute flexdecrypt
-        NSString *flexdecryptPath = [[NSBundle mainBundle] pathForResource:@"flexdecrypt_bin" ofType:nil];
-        if (!flexdecryptPath) {
-            flexdecryptPath = @"./flexdecrypt_bin"; // Fallback to current directory
-        }
-        
-        NSLog(@"[trolldecrypt] Using flexdecrypt at: %@", flexdecryptPath);
-        NSLog(@"[trolldecrypt] Decrypting binary: %@", executable);
-        
-        // First, run dlopen on the binary to load its dependencies
-        NSLog(@"[trolldecrypt] Running dlopen on %@ to load dependencies", executable);
-        NSString *dlopenPath = resolveToolPath(@"dlopentool", @"/usr/local/bin/dlopentool");
-        NSFileManager *fm = [NSFileManager defaultManager];
-        
-        if (dlopenPath && [fm fileExistsAtPath:dlopenPath]) {
-            NSString *dlopenStdOut = nil;
-            NSString *dlopenStdErr = nil;
-            int dlopenResult = spawnRoot(dlopenPath, @[executable], &dlopenStdOut, &dlopenStdErr);
-            
-            if (dlopenResult == 0) {
-                NSLog(@"[trolldecrypt] dlopen completed successfully for %@", executable);
-                if (dlopenStdOut && dlopenStdOut.length > 0) {
-                    NSLog(@"[trolldecrypt] dlopen stdout: %@", dlopenStdOut);
-                }
-            } else {
-                NSLog(@"[trolldecrypt] dlopen failed for %@ (exit code: %d): %@", executable, dlopenResult, dlopenStdErr);
-            }
-        } else {
-            NSLog(@"[trolldecrypt] dlopentool not found, skipping dlopen step");
-        }
-        
-        // Run flexdecrypt command
-        NSString *stdOut = nil;
-        NSString *stdErr = nil;
-        int result = spawnRoot(flexdecryptPath, @[executable], &stdOut, &stdErr);
-        
-        NSLog(@"[trolldecrypt] flexdecrypt result: %d", result);
-        if (stdOut && stdOut.length > 0) {
-            NSLog(@"[trolldecrypt] stdout: %@", stdOut);
-        }
-        if (stdErr && stdErr.length > 0) {
-            NSLog(@"[trolldecrypt] stderr: %@", stdErr);
-        }
-        
-        if (result != 0) {
-            NSLog(@"[trolldecrypt] flexdecrypt failed: %d, stderr: %@", result, stdErr);
-            NSString *errMessage = (stdErr && stdErr.length > 0) ? stdErr : [NSString stringWithFormat:@"FlexDecrypt returned exit code %d", result];
-            showResultAlert(@"FlexDecrypt Error", errMessage, nil, NO);
-            return;
-        }
-        
-        // Find the decrypted file in /tmp
-        NSString *decryptedPath = [NSString stringWithFormat:@"/tmp/%@", binaryName];
-        
-        if (![fm fileExistsAtPath:decryptedPath]) {
-            NSLog(@"[trolldecrypt] decrypted file not found at: %@", decryptedPath);
-            showResultAlert(@"FlexDecrypt Error", [NSString stringWithFormat:@"Decrypted file not found at: %@", decryptedPath], nil, NO);
-            return;
-        }
-        
-        NSLog(@"[trolldecrypt] Found decrypted file at: %@", decryptedPath);
-        
-        // Save decrypted binary to documents directory
+        // Kill running instance of the app if any to avoid collision
+        killall(binaryName, NO);
+
         NSString *cleanName = sanitizeFilename(name);
         NSString *cleanVersion = sanitizeFilename(version);
         NSString *outputPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@", cleanName, cleanVersion]];
-        
-        // Force remove existing file if it exists to allow overwrite
-        if ([fm fileExistsAtPath:outputPath]) {
-            NSLog(@"[trolldecrypt] Removing existing file to allow overwrite: %@", outputPath);
-            NSError *removeError;
-            [fm removeItemAtPath:outputPath error:&removeError];
-            if (removeError) {
-                NSLog(@"[trolldecrypt] Warning: Could not remove existing file: %@", removeError.localizedDescription);
-            }
-        }
-        
-        NSError *copyError;
-        if ([fm copyItemAtPath:decryptedPath toPath:outputPath error:&copyError]) {
+
+        BOOL success = decryptMachOFile(executable, outputPath);
+
+        if (success && [[NSFileManager defaultManager] fileExistsAtPath:outputPath]) {
             NSLog(@"[trolldecrypt] Successfully saved decrypted binary: %@", outputPath);
-            [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
-            [fm removeItemAtPath:decryptedPath error:nil];
             showResultAlert(@"Decryption Complete!", [NSString stringWithFormat:@"Decrypted binary saved to:\n%@", outputPath], outputPath, YES);
         } else {
-            NSLog(@"[trolldecrypt] Failed to copy decrypted file: %@", copyError.localizedDescription);
-            showResultAlert(@"Copy Error", [NSString stringWithFormat:@"Failed to save decrypted file: %@", copyError.localizedDescription], nil, NO);
+            NSLog(@"[trolldecrypt] Failed to decrypt binary: %@", executable);
+            showResultAlert(@"Decryption Error", [NSString stringWithFormat:@"Failed to decrypt binary:\n%@", binaryName], nil, NO);
         }
     });
 }
-
 
 NSArray *decryptedFileList(void) {
     NSMutableArray *files = [NSMutableArray array];
@@ -1105,6 +1033,9 @@ void decryptAllMachOInApp(NSDictionary *app) {
     });
     
     NSLog(@"[trolldecrypt] Starting comprehensive decryption for %@", name);
+    if (app[@"executable"]) {
+        killall([app[@"executable"] lastPathComponent], NO);
+    }
     
     // Dispatch heavy operations to background thread to avoid freezing UI
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -1297,57 +1228,152 @@ BOOL isMachOFile(NSString *filePath) {
 }
 
 BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
-    NSLog(@"[trolldecrypt] Decrypting mach-o file: %@", filePath);
+    if (!filePath || !outputPath) return NO;
+    NSLog(@"[trolldecrypt] Decrypting mach-o file: %@ -> %@", filePath, outputPath);
     
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *fileName = [filePath lastPathComponent];
+    NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
+    [fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:nil];
     
-    // First, run dlopen on the binary to load its dependencies
+    // Ensure flexdecrypt_bin exists and is executable
+    NSString *flexdecryptPath = resolveToolPath(@"flexdecrypt_bin", @"/Applications/TrollDecrypt.app/flexdecrypt_bin");
+    if (!flexdecryptPath || ![fm fileExistsAtPath:flexdecryptPath]) {
+        flexdecryptPath = [[NSBundle mainBundle] pathForResource:@"flexdecrypt_bin" ofType:nil];
+    }
+    if (!flexdecryptPath || ![fm fileExistsAtPath:flexdecryptPath]) {
+        flexdecryptPath = @"./flexdecrypt_bin";
+    }
+    
+    // Make sure it has execute permissions
+    chmod([flexdecryptPath UTF8String], 0755);
+    
+    // Optional dlopen
     NSString *dlopenPath = resolveToolPath(@"dlopentool", @"/usr/local/bin/dlopentool");
     if (dlopenPath && [fm fileExistsAtPath:dlopenPath]) {
+        chmod([dlopenPath UTF8String], 0755);
         NSString *dlopenStdOut = nil;
         NSString *dlopenStdErr = nil;
         spawnRoot(dlopenPath, @[filePath], &dlopenStdOut, &dlopenStdErr);
     }
     
-    // Use flexdecrypt to decrypt the file
-    NSString *flexdecryptPath = [[NSBundle mainBundle] pathForResource:@"flexdecrypt_bin" ofType:nil];
-    if (!flexdecryptPath) {
-        flexdecryptPath = @"./flexdecrypt_bin";
-    }
+    // Use an isolated temporary destination path for flexdecrypt output
+    NSString *tempDecryptedFile = [outputDir stringByAppendingPathComponent:[NSString stringWithFormat:@".td_dec_%@_%u", fileName, arc4random_uniform(100000)]];
+    [fm removeItemAtPath:tempDecryptedFile error:nil];
     
-    // Run flexdecrypt
-    NSString *stdOut = nil;
-    NSString *stdErr = nil;
-    int result = spawnRoot(flexdecryptPath, @[filePath], &stdOut, &stdErr);
-    
-    if (result != 0) {
-        NSLog(@"[trolldecrypt] FlexDecrypt failed for %@ (code %d): %@", filePath, result, stdErr);
-        return NO;
-    }
-    
-    // Find the decrypted file (usually in /tmp with the same name)
-    NSString *decryptedPath = [NSString stringWithFormat:@"/tmp/%@", [filePath lastPathComponent]];
-    
-    if ([fm fileExistsAtPath:decryptedPath]) {
-        NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
-        [fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:nil];
-        [fm removeItemAtPath:outputPath error:nil];
+    // Helper block to test if a candidate decrypted binary is valid and install it to outputPath
+    BOOL (^checkAndInstall)(NSString *candidatePath) = ^BOOL(NSString *candidatePath) {
+        if (!candidatePath || ![fm fileExistsAtPath:candidatePath]) return NO;
         
-        NSError *error;
-        if ([fm copyItemAtPath:decryptedPath toPath:outputPath error:&error]) {
-            NSLog(@"[trolldecrypt] Successfully decrypted: %@ -> %@", filePath, outputPath);
-            [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
-            [fm removeItemAtPath:decryptedPath error:nil];
-            return YES;
-        } else {
-            NSLog(@"[trolldecrypt] Failed to copy decrypted file: %@", error.localizedDescription);
-            [fm removeItemAtPath:decryptedPath error:nil];
+        // Verify candidate file is non-empty and truly decrypted (cryptid == 0)
+        NSDictionary *attrs = [fm attributesOfItemAtPath:candidatePath error:nil];
+        if ([attrs fileSize] == 0) {
+            NSLog(@"[trolldecrypt] Candidate %@ is 0 bytes, ignoring", candidatePath);
             return NO;
         }
-    } else {
-        NSLog(@"[trolldecrypt] Decrypted file not found at: %@", decryptedPath);
-        return NO;
+        
+        if (isMachOEncrypted(candidatePath)) {
+            NSLog(@"[trolldecrypt] Candidate %@ is still encrypted (cryptid != 0)", candidatePath);
+            return NO;
+        }
+        
+        // Candidate is verified decrypted (cryptid == 0)! Install it to outputPath
+        [fm removeItemAtPath:outputPath error:nil];
+        NSError *installError = nil;
+        if (![fm moveItemAtPath:candidatePath toPath:outputPath error:&installError]) {
+            if (![fm copyItemAtPath:candidatePath toPath:outputPath error:&installError]) {
+                NSLog(@"[trolldecrypt] Failed to install decrypted binary from %@ to %@: %@", candidatePath, outputPath, installError.localizedDescription);
+                return NO;
+            }
+            [fm removeItemAtPath:candidatePath error:nil];
+        }
+        
+        [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
+        NSLog(@"[trolldecrypt] Successfully installed decrypted Mach-O (cryptid == 0): %@", outputPath);
+        return YES;
+    };
+    
+    // Helper to parse "Wrote decrypted image to <path>" from flexdecrypt stdout
+    NSString* (^parseStdoutPath)(NSString *outputStr) = ^NSString*(NSString *outputStr) {
+        if (!outputStr || ![outputStr containsString:@"Wrote decrypted image to "]) return nil;
+        NSArray *lines = [outputStr componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        for (NSString *line in lines) {
+            if ([line containsString:@"Wrote decrypted image to "]) {
+                NSString *p = [[line componentsSeparatedByString:@"Wrote decrypted image to "] lastObject];
+                p = [p stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (p.length > 0) return p;
+            }
+        }
+        return nil;
+    };
+    
+    // Candidate fallback locations if --output was ignored
+    NSArray *fallbackLocations = @[
+        [NSString stringWithFormat:@"/private/var/tmp/%@", fileName],
+        [NSString stringWithFormat:@"/tmp/%@", fileName],
+        [NSTemporaryDirectory() stringByAppendingPathComponent:fileName],
+        [filePath stringByAppendingString:@".decrypted"],
+        [outputPath stringByAppendingString:@".decrypted"]
+    ];
+    
+    // Attempt 1: flexdecrypt <filePath> --output <tempDecryptedFile>
+    NSString *stdOut1 = nil;
+    NSString *stdErr1 = nil;
+    NSLog(@"[trolldecrypt] Attempt 1: %@ %@ --output %@", flexdecryptPath, filePath, tempDecryptedFile);
+    int res1 = spawnRoot(flexdecryptPath, @[filePath, @"--output", tempDecryptedFile], &stdOut1, &stdErr1);
+    NSLog(@"[trolldecrypt] Attempt 1 exited with %d (stdout: %@, stderr: %@)", res1, stdOut1, stdErr1);
+    
+    if (checkAndInstall(tempDecryptedFile)) return YES;
+    
+    NSString *parsedPath1 = parseStdoutPath(stdOut1);
+    if (parsedPath1 && checkAndInstall(parsedPath1)) return YES;
+    
+    for (NSString *cand in fallbackLocations) {
+        if (checkAndInstall(cand)) return YES;
     }
+    
+    // Attempt 2: flexdecrypt --output <tempDecryptedFile> <filePath> (option before argument)
+    NSString *stdOut2 = nil;
+    NSString *stdErr2 = nil;
+    NSLog(@"[trolldecrypt] Attempt 2: %@ --output %@ %@", flexdecryptPath, tempDecryptedFile, filePath);
+    int res2 = spawnRoot(flexdecryptPath, @[@"--output", tempDecryptedFile, filePath], &stdOut2, &stdErr2);
+    NSLog(@"[trolldecrypt] Attempt 2 exited with %d (stdout: %@, stderr: %@)", res2, stdOut2, stdErr2);
+    
+    if (checkAndInstall(tempDecryptedFile)) return YES;
+    
+    NSString *parsedPath2 = parseStdoutPath(stdOut2);
+    if (parsedPath2 && checkAndInstall(parsedPath2)) return YES;
+    
+    for (NSString *cand in fallbackLocations) {
+        if (checkAndInstall(cand)) return YES;
+    }
+    
+    // Attempt 3: flexdecrypt <filePath> (default output without --output flag)
+    NSString *stdOut3 = nil;
+    NSString *stdErr3 = nil;
+    NSLog(@"[trolldecrypt] Attempt 3: %@ %@", flexdecryptPath, filePath);
+    int res3 = spawnRoot(flexdecryptPath, @[filePath], &stdOut3, &stdErr3);
+    NSLog(@"[trolldecrypt] Attempt 3 exited with %d (stdout: %@, stderr: %@)", res3, stdOut3, stdErr3);
+    
+    NSString *parsedPath3 = parseStdoutPath(stdOut3);
+    if (parsedPath3 && checkAndInstall(parsedPath3)) return YES;
+    
+    for (NSString *cand in fallbackLocations) {
+        if (checkAndInstall(cand)) return YES;
+    }
+    
+    // Clean up temporary file
+    [fm removeItemAtPath:tempDecryptedFile error:nil];
+    
+    // Final sanity check: if the file at outputPath is already decrypted
+    if ([fm fileExistsAtPath:outputPath] && !isMachOEncrypted(outputPath)) {
+        NSLog(@"[trolldecrypt] Target at %@ verified decrypted (cryptid == 0)", outputPath);
+        [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:outputPath error:nil];
+        return YES;
+    }
+    
+    NSLog(@"[trolldecrypt] ERROR: Decryption failed for Mach-O file: %@", filePath);
+    return NO;
 }
 
 BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
@@ -1355,18 +1381,20 @@ BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // Create Payload directory in the same directory as the app bundle
-    NSString *workDir = [appBundlePath stringByDeletingLastPathComponent];
-    NSString *payloadDir = [workDir stringByAppendingPathComponent:@"Payload"];
-    [fm removeItemAtPath:payloadDir error:nil];
+    // Create dedicated packaging directory
+    NSString *baseDir = [appBundlePath stringByDeletingLastPathComponent];
+    NSString *packagingDir = [baseDir stringByAppendingPathComponent:@"_ipa_packaging"];
+    [fm removeItemAtPath:packagingDir error:nil];
+    
+    NSString *payloadDir = [packagingDir stringByAppendingPathComponent:@"Payload"];
     [fm createDirectoryAtPath:payloadDir withIntermediateDirectories:YES attributes:nil error:nil];
     
-    // Copy app bundle to Payload directory
+    // Copy app bundle to packagingDir/Payload/<AppName>.app
     NSString *payloadAppPath = [payloadDir stringByAppendingPathComponent:[appBundlePath lastPathComponent]];
-    NSError *copyError;
+    NSError *copyError = nil;
     if (![fm copyItemAtPath:appBundlePath toPath:payloadAppPath error:&copyError]) {
         NSLog(@"[trolldecrypt] Failed to copy app bundle to Payload: %@", copyError.localizedDescription);
-        [fm removeItemAtPath:payloadDir error:nil];
+        [fm removeItemAtPath:packagingDir error:nil];
         return NO;
     }
     
@@ -1374,7 +1402,7 @@ BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     NSString *checkPlist = [payloadAppPath stringByAppendingPathComponent:@"Info.plist"];
     if (![fm fileExistsAtPath:checkPlist]) {
         NSLog(@"[trolldecrypt] Failed to create IPA: Info.plist missing in app bundle");
-        [fm removeItemAtPath:payloadDir error:nil];
+        [fm removeItemAtPath:packagingDir error:nil];
         return NO;
     }
 
@@ -1384,7 +1412,7 @@ BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
         NSString *fullItemPath = [payloadAppPath stringByAppendingPathComponent:item];
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:fullItemPath isDirectory:&isDir] && !isDir) {
-            if ([fm isExecutableFileAtPath:fullItemPath]) {
+            if ([fm isExecutableFileAtPath:fullItemPath] || isMachOFile(fullItemPath)) {
                 [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:fullItemPath error:nil];
             }
         }
@@ -1393,18 +1421,19 @@ BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath) {
     // Remove existing destination IPA if any
     [fm removeItemAtPath:ipaPath error:nil];
 
-    // Create IPA using SSZipArchive directly (no external /usr/bin/zip dependency!)
+    // Create IPA using SSZipArchive directly from packagingDir
+    // withContentsOfDirectory:packagingDir keepParentDirectory:NO produces exact 'Payload/<AppName>.app/...'
     NSLog(@"[trolldecrypt] Creating IPA file using SSZipArchive: %@", ipaPath);
     BOOL zipSuccess = [SSZipArchive createZipFileAtPath:ipaPath
-                                withContentsOfDirectory:workDir
+                                withContentsOfDirectory:packagingDir
                                 keepParentDirectory:NO
                                 compressionLevel:1
                                 password:nil
                                 AES:NO
                                 progressHandler:nil];
 
-    // Clean up Payload directory
-    [fm removeItemAtPath:payloadDir error:nil];
+    // Clean up packaging directory
+    [fm removeItemAtPath:packagingDir error:nil];
 
     if (!zipSuccess || ![fm fileExistsAtPath:ipaPath]) {
         NSLog(@"[trolldecrypt] Failed to create IPA with SSZipArchive");
