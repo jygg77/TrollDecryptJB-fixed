@@ -34,7 +34,10 @@ jobs:
 
       - name: Setup iOS SDK
         run: |
-          git clone --quiet --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
+          git clone --quiet --depth=1 https://github.com/theos/sdks.git ~/sdks-temp
+          mkdir -p ~/theos/sdks
+          cp -r ~/sdks-temp/*.sdk ~/theos/sdks/ || true
+          rm -rf ~/sdks-temp
 
       - name: Compile Package
         run: |
