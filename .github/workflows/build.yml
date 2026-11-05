@@ -7,12 +7,56 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-15
-    strategy:
-      matrix:
-        scheme: [roothide]
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git perl curl fakeroot libtinfo5 libplist-dev libssl-dev zlib1g-dev
+
+      - name: Setup Theos & Toolchain
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
+
+      - name: Setup RootHide Theos
+        run: |
+          cd $HOME/theos
+          git remote add roothide https://github.com/RootHide/Theos.git || true
+          git fetch roothide
+          git checkout -B roothide roothide/master
+
+      - name: Setup iOS SDK
+        run: |
+          git clone --quiet --depth=1 https://github.com/theos/sdks.git ~/sdks-temp
+          mkdir -p $HOME/theos/sdks
+          cp -r ~/sdks-temp/*.sdk $HOME/theos/sdks/ || true
+          rm -rf ~/sdks-temp
+
+      - name: Compile Package
+        run: |
+          export THEOS=$HOME/theos
+          export PATH=$HOME/theos/bin:$PATH
+          export THEOS_PACKAGE_SCHEME=roothide
+          chmod +x flexdecrypt_bin dlopentool.c || true
+          make clean
+          make package FINALPACKAGE=1
+
+      - name: Upload Linux .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollDecryptJB-roothide-linux
+          path: packages/*.deb
+
+  build-macos:
+    runs-on: macos-15
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -25,11 +69,7 @@ jobs:
 
       - name: Setup Theos
         run: |
-          if [ "${{ matrix.scheme }}" = "roothide" ]; then
-            git clone --recursive https://github.com/RootHide/Theos.git ~/theos
-          else
-            git clone --recursive https://github.com/theos/theos.git ~/theos
-          fi
+          git clone --recursive https://github.com/RootHide/Theos.git ~/theos
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Setup iOS SDK
@@ -41,20 +81,13 @@ jobs:
 
       - name: Compile Package
         run: |
-          if [ "${{ matrix.scheme }}" = "roothide" ]; then
-            export THEOS_PACKAGE_SCHEME=roothide
-          elif [ "${{ matrix.scheme }}" = "rootless" ]; then
-            export THEOS_PACKAGE_SCHEME=rootless
-          fi
-          
-          # Assicura permessi di esecuzione per dlopentool e flexdecrypt_bin
+          export THEOS_PACKAGE_SCHEME=roothide
           chmod +x flexdecrypt_bin dlopentool.c || true
-
           make clean
           make package FINALPACKAGE=1
 
-      - name: Upload .deb Artifact
+      - name: Upload macOS .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrollDecryptJB-${{ matrix.scheme }}
+          name: TrollDecryptJB-roothide-macos
           path: packages/*.deb
