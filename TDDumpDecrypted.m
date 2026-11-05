@@ -190,36 +190,44 @@ int find_off_cryptid(const char *filePath) {
     NSLog(@"[trolldecrypt] %s filePath: %s", __FUNCTION__, filePath);
     int off_cryptid = 0;
     FILE* file = fopen(filePath, "rb");
-    if (!file) return 1;
+    if (!file) return 0;
 
-    fseek(file, 0, SEEK_END);
-    long fileSize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    char* buffer = malloc(fileSize);//new char[fileSize];
-    fread(buffer, 1, fileSize, file);
-
-    struct mach_header_64* header = (struct mach_header_64*)buffer;
-    if (header->magic != MH_MAGIC_64) {
-        printf("[-] error: not a valid macho file\n");
-        free(buffer);
+    struct mach_header_64 header;
+    if (fread(&header, sizeof(struct mach_header_64), 1, file) != 1) {
         fclose(file);
-        return 2;
+        return 0;
+    }
+    if (header.magic != MH_MAGIC_64) {
+        fclose(file);
+        return 0;
     }
 
-    struct load_command* lc = (struct load_command*)((mach_vm_address_t)header + sizeof(struct mach_header_64));
-    for (uint32_t i = 0; i < header->ncmds; i++) {
+    if (header.sizeofcmds == 0 || header.sizeofcmds > 1024 * 1024) {
+        fclose(file);
+        return 0;
+    }
+
+    char* buffer = (char*)malloc(header.sizeofcmds);
+    if (!buffer) {
+        fclose(file);
+        return 0;
+    }
+    if (fread(buffer, 1, header.sizeofcmds, file) != header.sizeofcmds) {
+        free(buffer);
+        fclose(file);
+        return 0;
+    }
+
+    struct load_command* lc = (struct load_command*)buffer;
+    for (uint32_t i = 0; i < header.ncmds; i++) {
+        if ((uintptr_t)lc + sizeof(struct load_command) > (uintptr_t)buffer + header.sizeofcmds) break;
         if (lc->cmd == LC_ENCRYPTION_INFO || lc->cmd == LC_ENCRYPTION_INFO_64) {
-            struct encryption_info_command *encryption_info = (struct encryption_info_command*) lc;
-
-
-            NSLog(@"[trolldecrypt] cryptid: %d\n", encryption_info->cryptid);
-            NSLog(@"[trolldecrypt] Found cryptid at offset: 0x%llx\n", (mach_vm_address_t)lc + offsetof(struct encryption_info_command, cryptid) - (mach_vm_address_t)header);
-
-            off_cryptid = (mach_vm_address_t)lc + offsetof(struct encryption_info_command, cryptid) - (mach_vm_address_t)header;
+            off_cryptid = (int)(sizeof(struct mach_header_64) + ((uintptr_t)lc - (uintptr_t)buffer) + offsetof(struct encryption_info_command, cryptid));
+            NSLog(@"[trolldecrypt] Found cryptid at offset: 0x%x\n", off_cryptid);
             break;
         }
-        lc = (struct load_command*)((mach_vm_address_t)lc + lc->cmdsize);
+        if (lc->cmdsize == 0) break;
+        lc = (struct load_command*)((uintptr_t)lc + lc->cmdsize);
     }
     free(buffer);
     fclose(file);
@@ -309,40 +317,39 @@ int find_off_cryptid(const char *filePath) {
     if (readmem((mach_vm_offset_t*)&header, imageAddress, sizeof(struct mach_header), targetTask, &region_info))
     {
         NSLog(@"[trolldecrypt] Can't read header!");
-        exit(1);
+        return false;
     }
-    //XXX: change all image_mh -> header NOW
     
     struct load_command *lc = (struct load_command*)malloc(header.sizeofcmds);
+    void *cmds_buf = (void *)lc;
+    if (!cmds_buf) {
+        return false;
+    }
 	
 	/* detect if this is a arm64 binary */
 	if (header.magic == MH_MAGIC_64) {
-		// lc = (struct load_command *)((unsigned char *)header + sizeof(struct mach_header_64));
         readmem((mach_vm_offset_t*)lc, imageAddress+sizeof(struct mach_header_64), header.sizeofcmds, targetTask, &region_info);
 		NSLog(@"[trolldecrypt] detected 64bit ARM binary in memory.\n");
-	} else if(header.magic == MH_MAGIC) { /* we might want to check for other errors here, too */
-		// lc = (struct load_command *)((unsigned char *)header + sizeof(struct mach_header));
+	} else if(header.magic == MH_MAGIC) {
         readmem((mach_vm_offset_t*)lc, imageAddress+sizeof(struct mach_header), header.sizeofcmds, targetTask, &region_info);
 		NSLog(@"[trolldecrypt] detected 32bit ARM binary in memory.\n");
 	} else {
 		NSLog(@"[trolldecrypt] No valid header found!!");
+		free(cmds_buf);
 		return false;
 	}
 
-
-    // sleep(1);exit(1);
     const struct mach_header *image_mh = &header;
 	
 	/* searching all load commands for an LC_ENCRYPTION_INFO load command */
 	for (i=0; i<image_mh->ncmds; i++) {
 		if (lc->cmd == LC_ENCRYPTION_INFO || lc->cmd == LC_ENCRYPTION_INFO_64) {
 			eic = (struct encryption_info_command *)lc;
-            // struct encryption_info_command *eic = (uint8_t*)malloc(sizeof(struct encryption_info_command););
-            // readmem((mach_vm_offset_t*)eic, imageAddress+sizeof(struct mach_header_64), header.sizeofcmds, targetTask, &region_info);
 			
 			const char *appFilename = strrchr(encryptedImageFilenameStr, '/');
 			if(appFilename == NULL) {
 				NSLog(@"[trolldecrypt] There are no / in the filename. This is an error.\n");
+				free(cmds_buf);
 				return false;
 			}
 			appFilename++;
@@ -350,27 +357,30 @@ int find_off_cryptid(const char *filePath) {
 			/* If this load command is present, but data is not crypted then exit */
 			if (eic->cryptid == 0) {
 				NSLog(@"[trolldecrypt] CryptID = 0!! ");
+				free(cmds_buf);
 				return false;
 			}
 
 			// Create a dir structure in ~ just like in /path/to/FooApp.app/Whatever
 			[self makeDirectories:encryptedImageFilenameStr];
 
-            //0x1518
             uint64_t aslr_slide = 0;
             get_image_size(imageAddress, targetTask, &aslr_slide);
             NSLog(@"[trolldecrypt] aslr_slide= 0x%llx", aslr_slide);
 
-			off_cryptid=find_off_cryptid(encryptedImageFilenameStr);
+			off_cryptid = find_off_cryptid(encryptedImageFilenameStr);
+			if (off_cryptid == 0) {
+				off_cryptid = (unsigned int)(fileoffs + ((uintptr_t)lc - (uintptr_t)cmds_buf) + sizeof(struct mach_header_64) + offsetof(struct encryption_info_command, cryptid));
+			}
 
 			NSLog(@"[trolldecrypt] offset to cryptid (%d) found in memory @ %p (from %p). off_cryptid = %u (0x%x)\n", eic->cryptid, &eic->cryptid, image_mh, off_cryptid, off_cryptid);
-			//NSLog(@"[trolldecrypt] Found encrypted data at offset %u 0x%08x. image_mh @ %p. cryptedData @ 0x%x. cryptsize = %u (0x%x) bytes.\n", eic->cryptoff, eic->cryptoff, image_mh, (unsigned int)image_mh + eic->cryptoff, eic->cryptsize, eic->cryptsize);
 			
 			NSLog(@"[trolldecrypt] Dumping: %s", encryptedImageFilenameStr);
 			NSLog(@"[trolldecrypt]    Into: %s", self->decryptedAppPathStr);
 			fd = open(encryptedImageFilenameStr, O_RDONLY);
 			if (fd == -1) {
 				NSLog(@"[trolldecrypt] Failed to open %s", encryptedImageFilenameStr);
+				free(cmds_buf);
 				return false;
 			}
 			
@@ -378,6 +388,8 @@ int find_off_cryptid(const char *filePath) {
 			n = read(fd, (void *)buffer, sizeof(buffer));
 			if (n != sizeof(buffer)) {
 				NSLog(@"[trolldecrypt] Warning read only %d of %lu bytes from encrypted file.\n", n, sizeof(buffer));
+				close(fd);
+				free(cmds_buf);
 				return false;
 			}
 
@@ -398,27 +410,33 @@ int find_off_cryptid(const char *filePath) {
 				}
 				if (fileoffs == 0) {
 					NSLog(@"[trolldecrypt] Could not find correct arch in FAT image\n");
+					close(fd);
+					free(cmds_buf);
 					return false;
 				}
 			} else if (fh->magic == MH_MAGIC || fh->magic == MH_MAGIC_64) {
 				NSLog(@"[trolldecrypt] Executable is a plain MACH-O image, fileoffs = 0\n");
 			} else {
 				NSLog(@"[trolldecrypt] Executable is of unknown type, fileoffs = 0\n");
+				close(fd);
+				free(cmds_buf);
 				return false;
 			}
 
 			NSLog(@"[trolldecrypt] Opening %s for writing.\n", decryptedAppPathStr);
-			outfd = open(decryptedAppPathStr, O_RDWR|O_CREAT|O_TRUNC, 0644);
+			outfd = open(decryptedAppPathStr, O_RDWR|O_CREAT|O_TRUNC, 0755);
 			if (outfd == -1) {
-				NSLog(@"[trolldecrypt] Failed opening: ");
+				NSLog(@"[trolldecrypt] Failed opening: %s", decryptedAppPathStr);
+				close(fd);
+				free(cmds_buf);
 				return false;
 			}
+			fchmod(outfd, 0755);
 			
 			/* calculate address of beginning of crypted data */
 			n = fileoffs + eic->cryptoff;
 			
-			restsize = lseek(fd, 0, SEEK_END) - n - eic->cryptsize;		
-			//NSLog(@"[trolldecrypt] restsize = %u, n = %u, cryptsize = %u, total = %u", restsize, n, eic->cryptsize, n + eic->cryptsize + restsize);
+			restsize = (unsigned int)(lseek(fd, 0, SEEK_END) - n - eic->cryptsize);
 			lseek(fd, 0, SEEK_SET);
 			
 			NSLog(@"[trolldecrypt] Copying the not encrypted start of the file (%u bytes)\n", n);
@@ -428,29 +446,38 @@ int find_off_cryptid(const char *filePath) {
 			r = read(fd, buf, n);
 			if(r != n) {
 				NSLog(@"[trolldecrypt] Error reading start of file\n");
+				free(buf);
+				close(fd);
+				close(outfd);
+				free(cmds_buf);
 				return false;
 			}
 			r = write(outfd, buf, n);
 			if(r != n) {
 				NSLog(@"[trolldecrypt] Error writing start of file\n");
-				return  false;
+				free(buf);
+				close(fd);
+				close(outfd);
+				free(cmds_buf);
+				return false;
 			}
 			free(buf);
 
 			/* now write the previously encrypted data */
-
 			NSLog(@"[trolldecrypt] Dumping the decrypted data into the file (%u bytes)\n", eic->cryptsize);
             buf = (char *)malloc((size_t)eic->cryptsize);
             readmem((mach_vm_offset_t*)buf, imageAddress+eic->cryptoff, eic->cryptsize, targetTask, &region_info);
-			// r = write(outfd, (unsigned char *)image_mh + eic->cryptoff, eic->cryptsize);
             r = write(outfd, buf, eic->cryptsize);
 			if (r != eic->cryptsize) {
 				NSLog(@"[trolldecrypt] Error writing encrypted part of file\n");
+				free(buf);
+				close(fd);
+				close(outfd);
+				free(cmds_buf);
 				return false;
 			}
             free(buf);
             
-			
 			/* and finish with the remainder of the file */
 			NSLog(@"[trolldecrypt] Copying the not encrypted remainder of the file (%u bytes)\n", restsize);
 			lseek(fd, eic->cryptsize, SEEK_CUR);
@@ -458,42 +485,46 @@ int find_off_cryptid(const char *filePath) {
 			r = read(fd, buf, restsize);
 			if (r != restsize) {
 				NSLog(@"[trolldecrypt] Error reading rest of file, got %u bytes\n", r);
+				free(buf);
+				close(fd);
+				close(outfd);
+				free(cmds_buf);
 				return false;
 			}
 			r = write(outfd, buf, restsize);
 			if (r != restsize) {
 				NSLog(@"[trolldecrypt] Error writing rest of file\n");
+				free(buf);
+				close(fd);
+				close(outfd);
+				free(cmds_buf);
 				return false;
 			}
 			free(buf);
-            
 
 			if (off_cryptid) {
-				uint32_t zero=0;
+				uint32_t zero = 0;
 				NSLog(@"[trolldecrypt] Setting the LC_ENCRYPTION_INFO->cryptid to 0 at offset 0x%x into file\n", off_cryptid);
 				if (lseek(outfd, off_cryptid, SEEK_SET) == off_cryptid) {
 					if(write(outfd, &zero, 4) != 4) {
 						NSLog(@"[trolldecrypt] Error writing cryptid value!!\n");
-						// Not a fatal error, just warn
 					}
 				} else {
 					NSLog(@"[trolldecrypt] Failed to seek to cryptid offset!!");
-					// this error is not treated as fatal
 				}
 			}
 	
+			fchmod(outfd, 0755);
 			close(fd);
 			close(outfd);
 			sync();
-            // exit(1);
-			
+			free(cmds_buf);
 			return true;
 		}
 		
 		lc = (struct load_command *)((unsigned char *)lc+lc->cmdsize);		
-        // readmem((mach_vm_offset_t*)lc, lc+lc->cmdsize, header.sizeofcmds, targetTask, &region_info);
 	}
-	// DEBUG(@"[!] This mach-o file is not encrypted. Nothing was decrypted.\n");
+	free(cmds_buf);
 	return false;
 }
 
@@ -504,21 +535,32 @@ int find_off_cryptid(const char *filePath) {
     if (task_for_pid(mach_task_self(), pid, &targetTask))
     {
         NSLog(@"[trolldecrypt] Can't execute task_for_pid! Do you have the right permissions/entitlements?\n");
-        exit(1);
+        return;
     }
 
     //numberOfImages
     struct task_dyld_info dyld_info;
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
 
-    if(task_info(targetTask, TASK_DYLD_INFO, (task_info_t)&dyld_info, &count) != KERN_SUCCESS) exit(1);
+    if(task_info(targetTask, TASK_DYLD_INFO, (task_info_t)&dyld_info, &count) != KERN_SUCCESS) {
+        NSLog(@"[trolldecrypt] task_info TASK_DYLD_INFO failed");
+        return;
+    }
 
     mach_msg_type_number_t size = sizeof(struct dyld_all_image_infos);
     uint8_t* data = readProcessMemory(targetTask, dyld_info.all_image_info_addr, &size);
+    if (!data) {
+        NSLog(@"[trolldecrypt] Failed to read dyld_all_image_infos");
+        return;
+    }
     struct dyld_all_image_infos* infos = (struct dyld_all_image_infos *) data;
 
     mach_msg_type_number_t size2 = sizeof(struct dyld_image_info) * infos->infoArrayCount;
     uint8_t* info_addr = readProcessMemory(targetTask, (mach_vm_address_t) infos->infoArray, &size2);
+    if (!info_addr) {
+        NSLog(@"[trolldecrypt] Failed to read dyld_image_info array");
+        return;
+    }
     struct dyld_image_info* info = (struct dyld_image_info*) info_addr;
         
     uint32_t numberOfImages = infos->infoArrayCount;
@@ -553,20 +595,23 @@ int find_off_cryptid(const char *filePath) {
 } 
 
 -(NSString *)IPAPath {
-	return [NSString stringWithFormat:@"%@/%@_%@_decrypted.ipa", [self docPath], self.appName, self.appVersion];
+	NSString *cleanName = sanitizeFilename(self.appName);
+	NSString *cleanVersion = sanitizeFilename(self.appVersion);
+	return [NSString stringWithFormat:@"%@/%@_%@_decrypted.ipa", [self docPath], cleanName, cleanVersion];
 }
 
 -(void) createIPAFile:(pid_t)pid {
 	NSString *IPAFile = [self IPAPath];
 	NSString *appDir  = [self appPath];
-	NSString *appCopyDir = [NSString stringWithFormat:@"%@/ipa/Payload/%s", [self docPath], self->appDirName];
+	NSString *payloadDir = [NSString stringWithFormat:@"%@/ipa/Payload", [self docPath]];
+	NSString *appCopyDir = [NSString stringWithFormat:@"%@/%s", payloadDir, self->appDirName];
 	NSString *zipDir = [NSString stringWithFormat:@"%@/ipa", [self docPath]];
 	NSFileManager *fm = [[NSFileManager alloc] init];
 	NSError *err;
 
 	[fm removeItemAtPath:IPAFile error:nil];
-	[fm removeItemAtPath:appCopyDir error:nil];
-	[fm createDirectoryAtPath:appCopyDir withIntermediateDirectories:true attributes:nil error:nil];
+	[fm removeItemAtPath:zipDir error:nil];
+	[fm createDirectoryAtPath:payloadDir withIntermediateDirectories:true attributes:nil error:nil];
 
 	[fm setDelegate:(id<NSFileManagerDelegate>)self];
 
@@ -607,9 +652,8 @@ int find_off_cryptid(const char *filePath) {
 		NSLog(@"[trolldecrypt] ========  ZIP operation complete: %s ========", (success)?"success":"failed");
 	}
 	@catch(NSException *e) {
-		NSLog(@"[trolldecrypt] BAAAAAAAARF during ZIP operation!!! , %@", e);
+		NSLog(@"[trolldecrypt] Exception during ZIP operation: %@", e);
 	}
-	
 
 	// Clean up. Leave only the .ipa file.
 	[fm removeItemAtPath:zipDir error:nil];

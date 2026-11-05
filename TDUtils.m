@@ -32,7 +32,7 @@ static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
 #include <mach-o/fat.h>
 #include <libkern/OSByteOrder.h>
 
-static NSString *sanitizeFilename(NSString *input) {
+NSString *sanitizeFilename(NSString *input) {
     if (!input || input.length == 0) return @"unnamed";
     NSCharacterSet *invalidChars = [NSCharacterSet characterSetWithCharactersInString:@"/\\?%*:\0|<>\"'\r\n\t"];
     NSString *clean = [[input componentsSeparatedByCharactersInSet:invalidChars] componentsJoinedByString:@"_"];
@@ -299,9 +299,283 @@ NSArray *sysctl_ps(void) {
     return [array copy];
 }
 
+static NSString *getLogPath(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"lldb_output.log"];
+}
+
+static BOOL waitForContentOfFileSync(NSString *filePath, NSString *content, NSTimeInterval timeout) {
+    NSTimeInterval startTime = [NSDate timeIntervalSinceReferenceDate];
+    while ([NSDate timeIntervalSinceReferenceDate] - startTime < timeout) {
+        @autoreleasepool {
+            if ([[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
+                NSString *fileContent = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
+                if (fileContent && [fileContent containsString:content]) {
+                    NSLog(@"[trolldecrypt] File content matched: %@", filePath);
+                    return YES;
+                }
+            }
+        }
+        usleep(100000); // 100ms
+    }
+    return NO;
+}
+
+static NSString *lldbQuotedProcessName(const char *executableName) {
+    if (!executableName) {
+        return nil;
+    }
+    NSString *name = [NSString stringWithUTF8String:executableName];
+    if (!name) {
+        return nil;
+    }
+
+    NSCharacterSet *controlSet = [NSCharacterSet controlCharacterSet];
+    NSMutableString *sanitized = [NSMutableString stringWithCapacity:name.length];
+    for (NSUInteger i = 0; i < name.length; i++) {
+        unichar c = [name characterAtIndex:i];
+        if ([controlSet characterIsMember:c]) {
+            continue;
+        }
+        [sanitized appendFormat:@"%C", c];
+    }
+
+    NSString *escaped = [[sanitized stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                         stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+    return [NSString stringWithFormat:@"\"%@\"", escaped];
+}
+
+static NSString *getLLDBPath(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *p = ROOT_PATH_NS(@"/usr/bin/lldb");
+    if (p && [fm fileExistsAtPath:p]) return p;
+    if ([fm fileExistsAtPath:@"/var/jb/usr/bin/lldb"]) return @"/var/jb/usr/bin/lldb";
+    if ([fm fileExistsAtPath:@"/usr/bin/lldb"]) return @"/usr/bin/lldb";
+    return nil;
+}
+
+pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
+    NSLog(@"[trolldecrypt] Attaching lldb to executable: %s (PID: %d)", executableName, target_pid);
+    NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"lldb_attach.txt"];
+    NSString *quotedName = lldbQuotedProcessName(executableName);
+    if (!quotedName) {
+        NSLog(@"[trolldecrypt] Invalid executable name for lldb attach");
+        return 0;
+    }
+    NSString *scriptContent = [NSString stringWithFormat:@"process attach --name %@ --waitfor\n", quotedName];
+    [scriptContent writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *logPath = getLogPath();
+    [[NSFileManager defaultManager] removeItemAtPath:logPath error:nil];
+
+    pid_t lldb_pid = 0;
+    NSString *lldbPathNS = getLLDBPath();
+    if (!lldbPathNS) {
+        NSLog(@"[trolldecrypt] lldb binary not found!");
+        return 0;
+    }
+    const char *lldb_path = [lldbPathNS UTF8String];
+    const char *args[] = {
+        "lldb",
+        "-s", [scriptPath UTF8String],
+        NULL
+    };
+    
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    
+    int status = posix_spawn(&lldb_pid, lldb_path, &actions, NULL, (char *const *)args, NULL);
+    posix_spawn_file_actions_destroy(&actions);
+    
+    if (status == 0) {
+        NSLog(@"[trolldecrypt] lldb spawned done, lldb PID: %d", lldb_pid);
+        NSLog(@"[trolldecrypt] lldb output: %@", logPath);
+        
+        waitForContentOfFileSync(logPath, @"process attach --name", 5.0);
+        usleep(500000); // 500ms
+        
+        // Verify lldb is still running
+        if (kill(lldb_pid, 0) == 0) {
+            NSLog(@"[trolldecrypt] lldb attached to '%s' (PID: %d)", executableName, target_pid);
+        } else {
+            NSLog(@"[trolldecrypt] lldb process died");
+            lldb_pid = 0;
+        }
+    } else {
+        NSLog(@"[trolldecrypt] fail to spawn lldb: %d", status);
+        lldb_pid = 0;
+    }
+    
+    return lldb_pid;
+}
+
+void detachLLDB(pid_t lldb_pid) {
+    if (lldb_pid > 0) {
+        NSLog(@"[trolldecrypt] Detaching lldb (PID: %d)", lldb_pid);
+
+        kill(lldb_pid, SIGTERM);
+        usleep(500000);
+      
+        if (kill(lldb_pid, 0) == 0) {
+            NSLog(@"[trolldecrypt] lldb still running, sending SIGKILL");
+            kill(lldb_pid, SIGKILL);
+        }
+        
+        NSLog(@"[trolldecrypt] lldb detached successfully");
+
+        int unused;
+        waitpid(lldb_pid, &unused, WNOHANG);
+    }
+}
+
+void bfinject_rocknroll(pid_t pid, NSString *appName, NSString *version, pid_t lldb_pid) {
+    NSLog(@"[trolldecrypt] decrypt...");
+    
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSLog(@"[trolldecrypt] Process PID: %d, lldb PID: %d", pid, lldb_pid);
+
+        char pathbuf[PROC_PIDPATHINFO_MAXSIZE];
+        proc_pidpath(pid, pathbuf, sizeof(pathbuf));
+        const char *fullPathStr = pathbuf;
+
+        NSLog(@"[trolldecrypt] fullPathStr: %s", fullPathStr);
+        NSLog(@"[trolldecrypt] Process is already PAUSED by lldb");
+        
+        DumpDecrypted *dd = [[DumpDecrypted alloc] initWithPathToBinary:[NSString stringWithUTF8String:fullPathStr] appName:appName appVersion:version];
+        if(!dd) {
+            NSLog(@"[trolldecrypt] ERROR: failed to get DumpDecrypted instance");
+            detachLLDB(lldb_pid);
+            kill(pid, SIGKILL);
+            showResultAlert(@"Error", @"Failed to initialize DumpDecrypted engine.", nil, NO);
+            return;
+        }
+
+        NSLog(@"[trolldecrypt] Full path to app: %s   ///   IPA File: %@", fullPathStr, [dd IPAPath]);
+
+        NSLog(@"[trolldecrypt] Starting decryption while process is paused...");
+        [dd createIPAFile:pid];
+        NSLog(@"[trolldecrypt] Decryption complete!");
+
+        NSLog(@"[trolldecrypt] Detaching lldb...");
+        detachLLDB(lldb_pid);
+        
+        // Terminate target app
+        kill(pid, SIGKILL);
+
+        NSString *ipaFile = [dd IPAPath];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:ipaFile]) {
+            showResultAlert(@"Decryption Complete!", [NSString stringWithFormat:@"IPA file saved to:\n%@\n\nSuccessfully decrypted using LLDB & SpringBoard suspended launch!", ipaFile], ipaFile, YES);
+        } else {
+            showResultAlert(@"Decryption Failed", @"IPA file was not generated or dump failed.", nil, NO);
+        }
+    });
+}
+
+void decryptAppWithLLDB(NSDictionary *app) {
+    NSString *bundleID = app[@"bundleID"];
+    NSString *name = app[@"name"];
+    NSString *version = app[@"version"];
+    NSString *executable = app[@"executable"];
+    NSString *binaryName = [executable lastPathComponent];
+
+    // Check if lldb is installed
+    NSString *lldbPath = getLLDBPath();
+    if (!lldbPath) {
+        showResultAlert(@"LLDB Not Installed",
+                        @"LLDB is required to decrypt apps that require higher iOS versions (e.g. iOS 17 apps on iOS 16).\n\nPlease install the 'lldb' package from Sileo or Zebra (Procursus repo).",
+                        nil, NO);
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        alertWindow = [[UIWindow alloc] initWithFrame: [UIScreen mainScreen].bounds];
+        alertWindow.rootViewController = [UIViewController new];
+        alertWindow.windowLevel = UIWindowLevelAlert + 1;
+        [alertWindow makeKeyAndVisible];
+        
+        kw = alertWindow;
+        if([kw respondsToSelector:@selector(topmostPresentedViewController)])
+            root = [kw performSelector:@selector(topmostPresentedViewController)];
+        else
+            root = [kw rootViewController];
+        root.modalPresentationStyle = UIModalPresentationFullScreen;
+
+        alertController = [UIAlertController alertControllerWithTitle:@"Decrypting with LLDB"
+                                                              message:@"Attaching debugger to suspended process...\nPlease wait a few moments."
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+        [root presentViewController:alertController animated:YES completion:nil];
+    });
+
+    NSLog(@"[trolldecrypt] decrypt with LLDB: %@", name);
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSLog(@"[trolldecrypt] bundleID: %@", bundleID);
+        NSLog(@"[trolldecrypt] name: %@", name);
+        NSLog(@"[trolldecrypt] version: %@", version);
+        NSLog(@"[trolldecrypt] executable: %@", executable);
+        NSLog(@"[trolldecrypt] binaryName: %@", binaryName);
+
+        // Kill existing process if any
+        NSLog(@"[trolldecrypt] kill existing process if any...");
+        NSArray *processes = sysctl_ps();
+        for (NSDictionary *process in processes) {
+            NSString *proc_name = process[@"proc_name"];
+            if ([proc_name isEqualToString:binaryName]) {
+                pid_t pid = [process[@"pid"] intValue];
+                NSLog(@"[trolldecrypt] Found app PID: %d (existing), killing...", pid);
+                kill(pid, SIGKILL);
+                break;
+            }
+        }
+        usleep(300000); // 300ms
+
+        NSLog(@"[trolldecrypt] lldb --waitfor for '%@'...", binaryName);
+        pid_t lldb_pid = attachLLDBToProcessByName([binaryName UTF8String], -1);
+        if (lldb_pid <= 0) {
+            NSLog(@"[trolldecrypt] Failed to attach lldb");
+            showResultAlert(@"Error: LLDB", @"Failed to start LLDB attach process.", nil, NO);
+            return;
+        }
+
+        NSLog(@"[trolldecrypt] Launching app via SpringBoard in suspended state...");
+        [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:YES];
+
+        // Wait for LLDB to catch the process
+        BOOL caught = waitForContentOfFileSync(getLogPath(), @"Architecture set to", 30.0);
+        if (!caught) {
+            NSString *logContent = [NSString stringWithContentsOfFile:getLogPath() encoding:NSUTF8StringEncoding error:nil];
+            if (![logContent containsString:@"stopped"] && ![logContent containsString:@"attached"]) {
+                NSLog(@"[trolldecrypt] Warning: Architecture set to not matched, log: %@", logContent);
+            }
+        }
+
+        // Get PID after LLDB caught it
+        pid_t pid = -1;
+        processes = sysctl_ps();
+        for (NSDictionary *process in processes) {
+            NSString *proc_name = process[@"proc_name"];
+            if ([proc_name isEqualToString:binaryName]) {
+                pid = [process[@"pid"] intValue];
+                NSLog(@"[trolldecrypt] Found app PID: %d (paused by LLDB)", pid);
+                break;
+            }
+        }
+
+        if (pid <= 0) {
+            NSLog(@"[trolldecrypt] Failed to get PID for binary name: %@", binaryName);
+            detachLLDB(lldb_pid);
+            showResultAlert(@"Error: -1", [NSString stringWithFormat:@"Failed to get PID for binary: %@", binaryName], nil, NO);
+            return;
+        }
+
+        NSLog(@"[trolldecrypt] Successfully caught PID: %d, starting dumpDecrypted...", pid);
+        bfinject_rocknroll(pid, name, version, lldb_pid);
+    });
+}
+
 void decryptApp(NSDictionary *app) {
-    // Use flexdecrypt method instead of lldb
-    decryptAppWithFlexDecrypt(app);
+    decryptAppWithLLDB(app);
 }
 
 void decryptAppWithFlexDecrypt(NSDictionary *app) {

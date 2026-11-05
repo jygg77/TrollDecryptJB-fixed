@@ -34,12 +34,17 @@
 
 int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
+NSString *sanitizeFilename(NSString *input);
 NSArray *appList(void);
 NSUInteger iconFormat(void);
 NSArray *sysctl_ps(void);
 void decryptApp(NSDictionary *app);
+void decryptAppWithLLDB(NSDictionary *app);
 void decryptAppWithFlexDecrypt(NSDictionary *app);
 void decryptAppWithPID(pid_t pid);
+pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid);
+void detachLLDB(pid_t lldb_pid);
+void bfinject_rocknroll(pid_t pid, NSString *appName, NSString *version, pid_t lldb_pid);
 void createIPAWithFlexDecrypt(NSDictionary *app, NSString *decryptedBinaryPath);
 void decryptAllMachOInApp(NSDictionary *app);
 NSArray *findAllMachOFiles(NSString *appPath);
