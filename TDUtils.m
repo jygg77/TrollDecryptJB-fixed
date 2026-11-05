@@ -3,6 +3,7 @@
 #import "LSApplicationProxy+AltList.h"
 #import "SSZipArchive/SSZipArchive.h"
 #import "appstoretrollerKiller/TSUtil.h"
+#include <sys/stat.h>
 
 #if __has_include(<rootless.h>)
 #import <rootless.h>
