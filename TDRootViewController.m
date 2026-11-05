@@ -241,8 +241,9 @@
         }
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Changes Applied" 
-                message:@"Daemons restarted successfully. Hook settings are now active."
+            NSString *msg = (result == 0) ? @"Daemons restarted successfully. Hook settings are now active." : [NSString stringWithFormat:@"Failed to restart daemons (exit code: %d).", result];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:(result == 0 ? @"Changes Applied" : @"Notice") 
+                message:msg
                 preferredStyle:UIAlertControllerStyleAlert];
             
             UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
