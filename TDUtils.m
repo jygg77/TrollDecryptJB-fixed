@@ -29,10 +29,6 @@ static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
     return nil;
 }
 
-BOOL decryptMachOFile(NSString *filePath, NSString *outputPath);
-BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath);
-NSArray *findAllMachOFiles(NSString *appPath);
-
 UIWindow *alertWindow = NULL;
 UIWindow *kw = NULL;
 UIViewController *root = NULL;

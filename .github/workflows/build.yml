@@ -8,11 +8,9 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     strategy:
-      fail-fast: false
       matrix:
-        os: [macos-13, macos-15]
         scheme: [roothide]
 
     steps:
