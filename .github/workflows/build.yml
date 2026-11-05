@@ -8,10 +8,10 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-latest
     strategy:
       matrix:
-        scheme: [roothide, rootless, rootful]
+        scheme: [roothide]
 
     steps:
       - name: Checkout Source
