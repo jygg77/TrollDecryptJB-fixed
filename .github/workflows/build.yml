@@ -26,7 +26,7 @@ jobs:
       - name: Setup Theos
         run: |
           if [ "${{ matrix.scheme }}" = "roothide" ]; then
-            git clone --recursive https://github.com/roothidedev/theos.git ~/theos
+            git clone --recursive https://github.com/RootHide/Theos.git ~/theos
           else
             git clone --recursive https://github.com/theos/theos.git ~/theos
           fi
