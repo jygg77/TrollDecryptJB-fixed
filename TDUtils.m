@@ -203,6 +203,8 @@ static void dismissAndCleanup(UIAlertController *alertToDismiss, void (^completi
     }
 }
 
+static NSString *g_lastDecryptionError = nil;
+
 static void showResultAlert(NSString *title, NSString *message, NSString *filePath, BOOL success) {
     dispatch_async(dispatch_get_main_queue(), ^{
         dismissAndCleanup(alertController, ^{
@@ -1119,13 +1121,15 @@ void decryptAllMachOInApp(NSDictionary *app) {
         // Clean up temp directory
         [fm removeItemAtPath:tempDir error:nil];
         
-        if (ipaSuccess && [fm fileExistsAtPath:ipaPath]) {
+        if (failedCount > 0) {
+            NSLog(@"[trolldecrypt] Decryption failed for %d binaries", failedCount);
+            [fm removeItemAtPath:ipaPath error:nil];
+            NSString *errMsg = [NSString stringWithFormat:@"Decryption failed for %d Mach-O binaries.\n\nDetails:\n%@", failedCount, g_lastDecryptionError ?: @"Unknown error"];
+            showResultAlert(@"Decryption Failed", errMsg, nil, NO);
+        } else if (ipaSuccess && [fm fileExistsAtPath:ipaPath]) {
             NSLog(@"[trolldecrypt] Comprehensive decryption completed for %@", name);
             NSLog(@"[trolldecrypt] IPA created at: %@", ipaPath);
             NSString *msg = [NSString stringWithFormat:@"IPA file saved to:\n%@\n\n(Processed %lu Mach-O files: %d decrypted, %d unencrypted)", ipaPath, (unsigned long)machOFiles.count, decryptedCount, skippedCount];
-            if (failedCount > 0) {
-                msg = [NSString stringWithFormat:@"IPA created with warnings:\n%@\n\n(%d decrypted, %d unencrypted, %d failed)", ipaPath, decryptedCount, skippedCount, failedCount];
-            }
             showResultAlert(@"Decryption Complete!", msg, ipaPath, YES);
         } else {
             NSLog(@"[trolldecrypt] Failed to create IPA file at: %@", ipaPath);
@@ -1374,6 +1378,10 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
     }
     
     NSLog(@"[trolldecrypt] ERROR: Decryption failed for Mach-O file: %@", filePath);
+    g_lastDecryptionError = [NSString stringWithFormat:@"File: %@\nRes1: %d, err1: %@, out1: %@\nRes2: %d, err2: %@, out2: %@\nRes3: %d, err3: %@, out3: %@",
+                             fileName, res1, stdErr1 ?: @"", stdOut1 ?: @"",
+                             res2, stdErr2 ?: @"", stdOut2 ?: @"",
+                             res3, stdErr3 ?: @"", stdOut3 ?: @""];
     return NO;
 }
 

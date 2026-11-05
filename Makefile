@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = TrollDecrypt
 TWEAK_NAME = TrollDecryptHook
-TOOL_NAME = TDDaemonKiller dlopentool
+TOOL_NAME = dlopentool
 
 # Application files
 TrollDecrypt_FILES = SSZipArchive/minizip/unzip.c SSZipArchive/minizip/crypt.c SSZipArchive/minizip/ioapi_buf.c SSZipArchive/minizip/ioapi_mem.c SSZipArchive/minizip/ioapi.c SSZipArchive/minizip/minishared.c SSZipArchive/minizip/zip.c SSZipArchive/minizip/aes/aes_ni.c SSZipArchive/minizip/aes/aescrypt.c SSZipArchive/minizip/aes/aeskey.c SSZipArchive/minizip/aes/aestab.c SSZipArchive/minizip/aes/fileenc.c SSZipArchive/minizip/aes/hmac.c SSZipArchive/minizip/aes/prng.c SSZipArchive/minizip/aes/pwd2key.c SSZipArchive/minizip/aes/sha1.c SSZipArchive/SSZipArchive.m
@@ -21,13 +21,6 @@ TrollDecrypt_BUNDLE_RESOURCES = flexdecrypt_bin
 # Tweak files (hooks into appstored)
 TrollDecryptHook_FILES = TweakHook14.xm TweakHook16.xm
 TrollDecryptHook_CFLAGS = -fobjc-arc -Wno-error
-
-# Tool to kill daemons with root privileges (renamed to avoid directory conflict)
-TDDaemonKiller_FILES = appstoretrollerKiller/main.m appstoretrollerKiller/TSUtil.m
-TDDaemonKiller_INSTALL_NAME = appstoretrollerKiller
-TDDaemonKiller_CFLAGS = -fobjc-arc -Wno-error
-TDDaemonKiller_CODESIGN_FLAGS = -SappstoretrollerKiller/entitlements.plist
-TDDaemonKiller_INSTALL_PATH = /usr/local/bin
 
 # dlopen tool
 dlopentool_FILES = dlopentool.c

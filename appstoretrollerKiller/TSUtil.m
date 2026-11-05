@@ -126,6 +126,8 @@ void printMultilineNSString(NSString* stringToPrint)
 
 int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdErr)
 {
+    setuid(0);
+    seteuid(0);
 	NSMutableArray* argsM = args.mutableCopy ?: [NSMutableArray new];
 	[argsM insertObject:path atIndex:0];
 	
@@ -177,7 +179,7 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 	
 	pid_t task_pid = 0;
 	int status = -200;
-	int spawnError = posix_spawn(&task_pid, [path UTF8String], &action, &attr, (char* const*)argsC, NULL);
+	int spawnError = posix_spawn(&task_pid, [path UTF8String], &action, &attr, (char* const*)argsC, environ);
 	posix_spawnattr_destroy(&attr);
 	posix_spawn_file_actions_destroy(&action);
 
@@ -189,7 +191,10 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 	
 	if (spawnError != 0)
 	{
-		NSLog(@"posix_spawn error %d\n", spawnError);
+		NSLog(@"posix_spawn error %d: %s (path: %@)\n", spawnError, strerror(spawnError), path);
+        if (stdErr) {
+            *stdErr = [NSString stringWithFormat:@"posix_spawn failed with error %d: %s", spawnError, strerror(spawnError)];
+        }
         if (stdOut && out[0] != -1) { close(out[0]); close(out[1]); }
         if (stdErr && outErr[0] != -1) { close(outErr[0]); close(outErr[1]); }
 		return spawnError;

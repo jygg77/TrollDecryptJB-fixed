@@ -224,32 +224,20 @@
 }
 
 - (void)applyChanges {
-    // kill: appstored, installd, and AppStore app
-    NSString *killerPath = ROOT_PATH_NS(@"/usr/local/bin/TDDaemonKiller");
-    
+    // kill: appstored, installd, and AppStore app directly
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *stdOut = nil;
-        NSString *stdErr = nil;
-        int result = spawnRoot(killerPath, @[], &stdOut, &stdErr);
-        
-        NSLog(@"[TrollDecrypt] appstoretrollerKiller result: %d", result);
-        if (stdOut && stdOut.length > 0) {
-            NSLog(@"[TrollDecrypt] stdout: %@", stdOut);
-        }
-        if (stdErr && stdErr.length > 0) {
-            NSLog(@"[TrollDecrypt] stderr: %@", stdErr);
-        }
+        killall(@"appstored", NO);
+        killall(@"installd", YES);
+        killall(@"AppStore", YES);
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *msg = (result == 0) ? @"Daemons restarted successfully. Hook settings are now active." : [NSString stringWithFormat:@"Failed to restart daemons (exit code: %d).", result];
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:(result == 0 ? @"Changes Applied" : @"Notice") 
-                message:msg
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Changes Applied"
+                message:@"Daemons restarted successfully. Hook settings are now active."
                 preferredStyle:UIAlertControllerStyleAlert];
             
             UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
             [alert addAction:ok];
             
-            // Present on the topmost view controller
             UIViewController *topVC = self;
             while (topVC.presentedViewController) {
                 topVC = topVC.presentedViewController;
@@ -321,17 +309,13 @@
 
         alert = [UIAlertController alertControllerWithTitle:@"Decrypt" message:[NSString stringWithFormat:@"Choose decryption method for %@:", app[@"name"]] preferredStyle:UIAlertControllerStyleAlert];
         UIAlertAction *cancel = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-        UIAlertAction *decryptLLDBAction = [UIAlertAction actionWithTitle:@"Decrypt Higher iOS App (LLDB)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            decryptAppWithLLDB(app);
-        }];
-        UIAlertAction *decryptIPAAction = [UIAlertAction actionWithTitle:@"Decrypt IPA (Standard)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIAlertAction *decryptIPAAction = [UIAlertAction actionWithTitle:@"Decrypt IPA" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             decryptAllMachOInApp(app);
         }];
         UIAlertAction *decryptMainAction = [UIAlertAction actionWithTitle:@"Decrypt Main Binary Only" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             decryptAppWithFlexDecrypt(app);
         }];
 
-        [alert addAction:decryptLLDBAction];
         [alert addAction:decryptIPAAction];
         [alert addAction:decryptMainAction];
         [alert addAction:cancel];

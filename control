@@ -7,5 +7,3 @@ Maintainer: Little 34306
 Author: 34306, khanhduytran0
 Section: Applications
 Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)
-Replaces: dev.mineek.appstoretroller
-Conflicts: dev.mineek.appstoretroller

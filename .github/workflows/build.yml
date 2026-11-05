@@ -44,6 +44,7 @@ jobs:
         run: |
           export THEOS=$HOME/theos
           export THEOS_PACKAGE_SCHEME=roothide
+          ldid -Sentitlements.plist flexdecrypt_bin || true
           chmod +x flexdecrypt_bin dlopentool.c || true
           make clean
           make package FINALPACKAGE=1
@@ -54,6 +55,7 @@ jobs:
         run: |
           export THEOS=$HOME/theos
           export THEOS_PACKAGE_SCHEME=rootless
+          ldid -Sentitlements.plist flexdecrypt_bin || true
           make clean
           make package FINALPACKAGE=1
           mkdir -p out-rootless
