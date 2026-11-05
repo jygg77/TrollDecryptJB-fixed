@@ -29,6 +29,162 @@ static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
     return nil;
 }
 
+#include <mach-o/fat.h>
+#include <libkern/OSByteOrder.h>
+
+static NSString *sanitizeFilename(NSString *input) {
+    if (!input || input.length == 0) return @"unnamed";
+    NSCharacterSet *invalidChars = [NSCharacterSet characterSetWithCharactersInString:@"/\\?%*:\0|<>\"'\r\n\t"];
+    NSString *clean = [[input componentsSeparatedByCharactersInSet:invalidChars] componentsJoinedByString:@"_"];
+    clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return clean.length > 0 ? clean : @"unnamed";
+}
+
+static NSString *createSecureTempDir(NSString *prefix) {
+    NSString *base = NSTemporaryDirectory() ?: @"/tmp";
+    NSString *cleanPrefix = sanitizeFilename(prefix);
+    NSString *templatePath = [base stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_XXXXXX", cleanPrefix]];
+    char *templateCString = strdup([templatePath fileSystemRepresentation]);
+    if (!templateCString) return nil;
+    char *dirPath = mkdtemp(templateCString);
+    if (!dirPath) {
+        free(templateCString);
+        return nil;
+    }
+    NSString *result = [NSString stringWithUTF8String:dirPath];
+    free(templateCString);
+    return result;
+}
+
+BOOL isMachOEncrypted(NSString *filePath) {
+    if (!filePath || filePath.length == 0) return NO;
+    
+    int fd = open([filePath fileSystemRepresentation], O_RDONLY);
+    if (fd < 0) return NO;
+    
+    uint32_t magic = 0;
+    if (read(fd, &magic, sizeof(magic)) != sizeof(magic)) {
+        close(fd);
+        return NO;
+    }
+    
+    BOOL (^checkSlice)(off_t offset) = ^BOOL(off_t offset) {
+        if (lseek(fd, offset, SEEK_SET) < 0) return NO;
+        
+        uint32_t sliceMagic = 0;
+        if (read(fd, &sliceMagic, sizeof(sliceMagic)) != sizeof(sliceMagic)) return NO;
+        
+        BOOL is64 = (sliceMagic == MH_MAGIC_64 || sliceMagic == MH_CIGAM_64);
+        BOOL is32 = (sliceMagic == MH_MAGIC || sliceMagic == MH_CIGAM);
+        if (!is64 && !is32) return NO;
+        
+        BOOL needSwap = (sliceMagic == MH_CIGAM || sliceMagic == MH_CIGAM_64);
+        uint32_t ncmds = 0;
+        uint32_t sizeofcmds = 0;
+        
+        if (is64) {
+            struct mach_header_64 header;
+            if (lseek(fd, offset, SEEK_SET) < 0) return NO;
+            if (read(fd, &header, sizeof(header)) != sizeof(header)) return NO;
+            ncmds = needSwap ? OSSwapInt32(header.ncmds) : header.ncmds;
+            sizeofcmds = needSwap ? OSSwapInt32(header.sizeofcmds) : header.sizeofcmds;
+        } else {
+            struct mach_header header;
+            if (lseek(fd, offset, SEEK_SET) < 0) return NO;
+            if (read(fd, &header, sizeof(header)) != sizeof(header)) return NO;
+            ncmds = needSwap ? OSSwapInt32(header.ncmds) : header.ncmds;
+            sizeofcmds = needSwap ? OSSwapInt32(header.sizeofcmds) : header.sizeofcmds;
+        }
+        
+        if (sizeofcmds == 0 || ncmds == 0 || sizeofcmds > 2 * 1024 * 1024) return NO;
+        
+        void *cmdBuf = malloc(sizeofcmds);
+        if (!cmdBuf) return NO;
+        
+        if (read(fd, cmdBuf, sizeofcmds) != sizeofcmds) {
+            free(cmdBuf);
+            return NO;
+        }
+        
+        BOOL encrypted = NO;
+        uint8_t *cur = (uint8_t *)cmdBuf;
+        uint8_t *end = cur + sizeofcmds;
+        
+        for (uint32_t i = 0; i < ncmds && cur + sizeof(struct load_command) <= end; i++) {
+            struct load_command *lc = (struct load_command *)cur;
+            uint32_t cmd = needSwap ? OSSwapInt32(lc->cmd) : lc->cmd;
+            uint32_t cmdsize = needSwap ? OSSwapInt32(lc->cmdsize) : lc->cmdsize;
+            
+            if (cmdsize < sizeof(struct load_command) || cur + cmdsize > end) break;
+            
+            if (cmd == LC_ENCRYPTION_INFO) {
+                struct encryption_info_command *enc = (struct encryption_info_command *)cur;
+                uint32_t cryptid = needSwap ? OSSwapInt32(enc->cryptid) : enc->cryptid;
+                if (cryptid > 0) {
+                    encrypted = YES;
+                    break;
+                }
+            } else if (cmd == LC_ENCRYPTION_INFO_64) {
+                struct encryption_info_command_64 *enc = (struct encryption_info_command_64 *)cur;
+                uint32_t cryptid = needSwap ? OSSwapInt32(enc->cryptid) : enc->cryptid;
+                if (cryptid > 0) {
+                    encrypted = YES;
+                    break;
+                }
+            }
+            cur += cmdsize;
+        }
+        
+        free(cmdBuf);
+        return encrypted;
+    };
+    
+    BOOL isEncrypted = NO;
+    
+    if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
+        BOOL needSwap = (magic == FAT_CIGAM);
+        struct fat_header fhdr;
+        lseek(fd, 0, SEEK_SET);
+        if (read(fd, &fhdr, sizeof(fhdr)) == sizeof(fhdr)) {
+            uint32_t nfat_arch = needSwap ? OSSwapInt32(fhdr.nfat_arch) : fhdr.nfat_arch;
+            for (uint32_t i = 0; i < nfat_arch && i < 16; i++) {
+                struct fat_arch arch;
+                if (read(fd, &arch, sizeof(arch)) != sizeof(arch)) break;
+                off_t offset = needSwap ? OSSwapInt32(arch.offset) : arch.offset;
+                off_t currentPos = lseek(fd, 0, SEEK_CUR);
+                if (checkSlice(offset)) {
+                    isEncrypted = YES;
+                    break;
+                }
+                lseek(fd, currentPos, SEEK_SET);
+            }
+        }
+    } else if (magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64) {
+        BOOL needSwap = (magic == FAT_CIGAM_64);
+        struct fat_header fhdr;
+        lseek(fd, 0, SEEK_SET);
+        if (read(fd, &fhdr, sizeof(fhdr)) == sizeof(fhdr)) {
+            uint32_t nfat_arch = needSwap ? OSSwapInt32(fhdr.nfat_arch) : fhdr.nfat_arch;
+            for (uint32_t i = 0; i < nfat_arch && i < 16; i++) {
+                struct fat_arch_64 arch;
+                if (read(fd, &arch, sizeof(arch)) != sizeof(arch)) break;
+                off_t offset = needSwap ? OSSwapInt64(arch.offset) : arch.offset;
+                off_t currentPos = lseek(fd, 0, SEEK_CUR);
+                if (checkSlice(offset)) {
+                    isEncrypted = YES;
+                    break;
+                }
+                lseek(fd, currentPos, SEEK_SET);
+            }
+        }
+    } else {
+        isEncrypted = checkSlice(0);
+    }
+    
+    close(fd);
+    return isEncrypted;
+}
+
 UIWindow *alertWindow = NULL;
 UIWindow *kw = NULL;
 UIViewController *root = NULL;
@@ -250,7 +406,9 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
         NSLog(@"[trolldecrypt] Found decrypted file at: %@", decryptedPath);
         
         // Save decrypted binary to documents directory
-        NSString *outputPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@", name, version]];
+        NSString *cleanName = sanitizeFilename(name);
+        NSString *cleanVersion = sanitizeFilename(version);
+        NSString *outputPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@", cleanName, cleanVersion]];
         
         // Force remove existing file if it exists to allow overwrite
         if ([fm fileExistsAtPath:outputPath]) {
@@ -439,8 +597,8 @@ NSString *trollDecryptVersion(void) {
 }
 
 void createIPAWithFlexDecrypt(NSDictionary *app, NSString *decryptedBinaryPath) {
-    NSString *name = app[@"name"];
-    NSString *version = app[@"version"];
+    NSString *cleanName = sanitizeFilename(app[@"name"]);
+    NSString *cleanVersion = sanitizeFilename(app[@"version"]);
     NSString *executable = app[@"executable"];
     NSString *binaryName = [executable lastPathComponent];
     
@@ -448,12 +606,15 @@ void createIPAWithFlexDecrypt(NSDictionary *app, NSString *decryptedBinaryPath) 
     NSString *appPath = [executable stringByDeletingLastPathComponent];
     NSString *docPathStr = docPath();
     
-    // Create IPA structure
-    NSString *ipaDir = [NSString stringWithFormat:@"%@/ipa", docPathStr];
+    // Create IPA structure in secure temp directory
+    NSString *ipaDir = createSecureTempDir(cleanName);
+    if (!ipaDir) {
+        ipaDir = [NSString stringWithFormat:@"%@/ipa_%lu", docPathStr, (unsigned long)[[NSDate date] timeIntervalSince1970]];
+    }
     NSString *payloadDir = [NSString stringWithFormat:@"%@/Payload", ipaDir];
     NSString *appDirName = [appPath lastPathComponent];
     NSString *appCopyDir = [NSString stringWithFormat:@"%@/%@", payloadDir, appDirName];
-    NSString *ipaFile = [NSString stringWithFormat:@"%@/%@_%@_decrypted.ipa", docPathStr, name, version];
+    NSString *ipaFile = [NSString stringWithFormat:@"%@/%@_%@_decrypted.ipa", docPathStr, cleanName, cleanVersion];
     
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error;
@@ -644,6 +805,8 @@ void decryptAllMachOInApp(NSDictionary *app) {
     NSString *bundleID = app[@"bundleID"];
     NSString *name = app[@"name"];
     NSString *version = app[@"version"];
+    NSString *cleanName = sanitizeFilename(name);
+    NSString *cleanVersion = sanitizeFilename(version);
     
     // Show UI alert
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -698,8 +861,11 @@ void decryptAllMachOInApp(NSDictionary *app) {
             return;
         }
         
-        // Create temporary working directory
-        NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_decrypt_work", name]];
+        // Create secure temporary working directory
+        NSString *tempDir = createSecureTempDir(cleanName);
+        if (!tempDir) {
+            tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_decrypt_work", cleanName]];
+        }
         NSFileManager *fm = [NSFileManager defaultManager];
         [fm removeItemAtPath:tempDir error:nil];
         [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -718,18 +884,30 @@ void decryptAllMachOInApp(NSDictionary *app) {
         
         // Decrypt each mach-o file and replace it in the temp app bundle
         int failedCount = 0;
+        int skippedCount = 0;
+        int decryptedCount = 0;
         for (NSString *machOFile in machOFiles) {
             NSString *relativePath = [machOFile substringFromIndex:appPath.length + 1];
             NSString *tempMachOPath = [tempAppPath stringByAppendingPathComponent:relativePath];
             
-            NSLog(@"[trolldecrypt] Decrypting: %@", relativePath);
+            // Check if binary is actually FairPlay encrypted
+            if (!isMachOEncrypted(machOFile)) {
+                NSLog(@"[trolldecrypt] Skipping %@ (already decrypted or unencrypted, cryptid == 0)", relativePath);
+                [fm setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:tempMachOPath error:nil];
+                skippedCount++;
+                continue;
+            }
+            
+            NSLog(@"[trolldecrypt] Decrypting encrypted binary: %@", relativePath);
             if (!decryptMachOFile(machOFile, tempMachOPath)) {
                 failedCount++;
+            } else {
+                decryptedCount++;
             }
         }
         
         // Create IPA from the modified app bundle
-        NSString *ipaPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@_decrypted.ipa", name, version]];
+        NSString *ipaPath = [docPath() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@_decrypted.ipa", cleanName, cleanVersion]];
         BOOL ipaSuccess = createIPAFromAppBundle(tempAppPath, ipaPath);
         
         // Clean up temp directory
@@ -738,9 +916,9 @@ void decryptAllMachOInApp(NSDictionary *app) {
         if (ipaSuccess && [fm fileExistsAtPath:ipaPath]) {
             NSLog(@"[trolldecrypt] Comprehensive decryption completed for %@", name);
             NSLog(@"[trolldecrypt] IPA created at: %@", ipaPath);
-            NSString *msg = [NSString stringWithFormat:@"IPA file saved to:\n%@\n\n(Processed %lu Mach-O files)", ipaPath, (unsigned long)machOFiles.count];
+            NSString *msg = [NSString stringWithFormat:@"IPA file saved to:\n%@\n\n(Processed %lu Mach-O files: %d decrypted, %d unencrypted)", ipaPath, (unsigned long)machOFiles.count, decryptedCount, skippedCount];
             if (failedCount > 0) {
-                msg = [NSString stringWithFormat:@"IPA created with warnings:\n%@\n\n(%d of %lu binaries failed decryption)", ipaPath, failedCount, (unsigned long)machOFiles.count];
+                msg = [NSString stringWithFormat:@"IPA created with warnings:\n%@\n\n(%d decrypted, %d unencrypted, %d failed)", ipaPath, decryptedCount, skippedCount, failedCount];
             }
             showResultAlert(@"Decryption Complete!", msg, ipaPath, YES);
         } else {

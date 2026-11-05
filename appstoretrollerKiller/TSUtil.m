@@ -280,11 +280,10 @@ void enumerateProcessesUsingBlock(void (^enumerator)(pid_t pid, NSString* execut
         }
     }
     int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL};
-    struct kinfo_proc *info;
-    size_t length;
-    int count;
+    struct kinfo_proc *info = NULL;
+    size_t length = 0;
     
-    if (sysctl(mib, 3, NULL, &length, NULL, 0) < 0)
+    if (sysctl(mib, 3, NULL, &length, NULL, 0) < 0 || length == 0)
         return;
     if (!(info = malloc(length)))
         return;
@@ -292,29 +291,36 @@ void enumerateProcessesUsingBlock(void (^enumerator)(pid_t pid, NSString* execut
         free(info);
         return;
     }
-    count = length / sizeof(struct kinfo_proc);
+
+    char *buffer = (char *)malloc(maxArgumentSize);
+    if (!buffer) {
+        free(info);
+        return;
+    }
+
+    int count = length / sizeof(struct kinfo_proc);
     for (int i = 0; i < count; i++) {
         @autoreleasepool {
-        pid_t pid = info[i].kp_proc.p_pid;
-        if (pid == 0) {
-            continue;
-        }
-        size_t size = maxArgumentSize;
-        char* buffer = (char *)malloc(length);
-        if (sysctl((int[]){ CTL_KERN, KERN_PROCARGS2, pid }, 3, buffer, &size, NULL, 0) == 0) {
-            NSString* executablePath = [NSString stringWithCString:(buffer+sizeof(int)) encoding:NSUTF8StringEncoding];
-            
-            BOOL stop = NO;
-            enumerator(pid, executablePath, &stop);
-            if(stop)
-            {
-                free(buffer);
-                break;
+            pid_t pid = info[i].kp_proc.p_pid;
+            if (pid == 0) {
+                continue;
+            }
+            size_t size = maxArgumentSize;
+            if (sysctl((int[]){ CTL_KERN, KERN_PROCARGS2, pid }, 3, buffer, &size, NULL, 0) == 0) {
+                if (size > sizeof(int)) {
+                    NSString* executablePath = [NSString stringWithCString:(buffer+sizeof(int)) encoding:NSUTF8StringEncoding];
+                    if (executablePath) {
+                        BOOL stop = NO;
+                        enumerator(pid, executablePath, &stop);
+                        if (stop) {
+                            break;
+                        }
+                    }
+                }
             }
         }
-        free(buffer);
-        }
     }
+    free(buffer);
     free(info);
 }
 

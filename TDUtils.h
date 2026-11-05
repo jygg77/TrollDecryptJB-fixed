@@ -44,6 +44,7 @@ void createIPAWithFlexDecrypt(NSDictionary *app, NSString *decryptedBinaryPath);
 void decryptAllMachOInApp(NSDictionary *app);
 NSArray *findAllMachOFiles(NSString *appPath);
 BOOL isMachOFile(NSString *filePath);
+BOOL isMachOEncrypted(NSString *filePath);
 BOOL decryptMachOFile(NSString *filePath, NSString *outputPath);
 BOOL createIPAFromAppBundle(NSString *appBundlePath, NSString *ipaPath);
 NSArray *decryptedFileList(void);

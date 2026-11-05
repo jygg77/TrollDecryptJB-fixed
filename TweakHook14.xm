@@ -226,6 +226,11 @@ char STORED_STRING[10][MAX_STRING_LEN];
 
 %ctor
 {
+	// Only activate on iOS < 15 to avoid duplicate hook collisions with TweakHook16
+	if (kCFCoreFoundationVersionNumber >= 1850.0) { // 1850.0 corresponds to iOS 15.0
+		return;
+	}
+
 	bzero(STORED_STRING[kUserAgent], MAX_STRING_LEN);
 	strcpy(STORED_STRING[kUserAgent], "User-Agent");
 	
