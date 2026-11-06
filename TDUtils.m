@@ -1094,9 +1094,6 @@ void decryptAllMachOInApp(NSDictionary *app) {
     });
     
     NSLog(@"[trolldecrypt] Starting comprehensive decryption for %@", name);
-    if (app[@"executable"]) {
-        killall([app[@"executable"] lastPathComponent], NO);
-    }
     
     // Dispatch heavy operations to background thread to avoid freezing UI
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
