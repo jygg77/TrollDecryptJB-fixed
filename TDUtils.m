@@ -324,7 +324,7 @@ NSArray *sysctl_ps(void) {
 }
 
 static NSString *getLogPath(void) {
-    return [docPath() stringByAppendingPathComponent:@"lldb_output.log"];
+    return @"/tmp/lldb_output.log";
 }
 
 static BOOL waitForContentOfFileSync(NSString *filePath, NSString *content, NSTimeInterval timeout) {
@@ -381,21 +381,11 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
     setuid(0);
     seteuid(0);
     NSLog(@"[trolldecrypt] Attaching lldb to executable: %s (PID: %d)", executableName, target_pid);
-    NSString *scriptPath = [docPath() stringByAppendingPathComponent:@"lldb_attach.txt"];
     NSString *quotedName = lldbQuotedProcessName(executableName);
     if (!quotedName) {
         NSLog(@"[trolldecrypt] Invalid executable name for lldb attach");
         return 0;
     }
-    NSString *scriptContent = [NSString stringWithFormat:@"process attach --name %@ --waitfor\n", quotedName];
-    NSError *writeErr = nil;
-    BOOL wrote = [scriptContent writeToFile:scriptPath atomically:NO encoding:NSUTF8StringEncoding error:&writeErr];
-    if (!wrote) {
-        NSLog(@"[trolldecrypt] Failed to write script file at %@: %@", scriptPath, writeErr.localizedDescription);
-        scriptPath = @"/tmp/lldb_attach.txt";
-        [scriptContent writeToFile:scriptPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    }
-    chmod([scriptPath UTF8String], 0666);
     NSString *logPath = getLogPath();
     [[NSFileManager defaultManager] removeItemAtPath:logPath error:nil];
 
@@ -406,9 +396,11 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
         return 0;
     }
     const char *lldb_path = [lldbPathNS UTF8String];
+    NSString *oneLineCmd = [NSString stringWithFormat:@"process attach --name %@ --waitfor", quotedName];
     const char *args[] = {
         "lldb",
-        "-s", [scriptPath UTF8String],
+        "--batch",
+        "-o", [oneLineCmd UTF8String],
         NULL
     };
     
