@@ -45,6 +45,8 @@ jobs:
           export THEOS=$HOME/theos
           export THEOS_PACKAGE_SCHEME=roothide
           ldid -Sentitlements.plist flexdecrypt_bin || true
+          echo "=== Entitlements in flexdecrypt_bin ==="
+          ldid -e flexdecrypt_bin || true
           chmod +x flexdecrypt_bin dlopentool.c || true
           make clean
           make package FINALPACKAGE=1

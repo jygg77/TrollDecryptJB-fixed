@@ -13,10 +13,14 @@ extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, u
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict, uid_t);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict, uid_t);
 
-#if __has_include(<rootless.h>)
+#if __has_include(<roothide.h>)
+#import <roothide.h>
+#define JB_ROOT_PATH_NS(path) jbroot(path)
+#elif __has_include(<rootless.h>)
 #import <rootless.h>
+#define JB_ROOT_PATH_NS(path) ROOT_PATH_NS(path)
 #else
-#define ROOT_PATH_NS(path) path
+#define JB_ROOT_PATH_NS(path) path
 #endif
 
 static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
@@ -26,10 +30,15 @@ static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
     if (bundlePath && [fm fileExistsAtPath:bundlePath]) {
         return bundlePath;
     }
-    // Check rootless / roothide path
-    NSString *rootlessPath = ROOT_PATH_NS(fallbackPath);
-    if ([fm fileExistsAtPath:rootlessPath]) {
-        return rootlessPath;
+    // Check roothide / rootless dynamic path
+    NSString *jbPath = JB_ROOT_PATH_NS(fallbackPath);
+    if (jbPath && [fm fileExistsAtPath:jbPath]) {
+        return jbPath;
+    }
+    // Also check standard /var/jb
+    NSString *varJbPath = [@"/var/jb" stringByAppendingPathComponent:fallbackPath];
+    if ([fm fileExistsAtPath:varJbPath]) {
+        return varJbPath;
     }
     // Check raw fallback path
     if ([fm fileExistsAtPath:fallbackPath]) {

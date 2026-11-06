@@ -4,12 +4,6 @@
 <dict>
 	<key>platform-application</key>
 	<true/>
-	<key>application-identifier</key>
-	<string>com.trolldecrypt.jailbreak</string>
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/</string>
-	</array>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.persona-mgmt</key>
@@ -22,6 +16,24 @@
 	<true/>
 	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.private.cs.debugger</key>
+	<true/>
+	<key>dynamic-codesigning</key>
+	<true/>
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+	<key>com.apple.diagnosticd.diagnostic</key>
+	<true/>
+	<key>com.apple.frontboard.debugapplications</key>
+	<true/>
+	<key>com.apple.multitasking.termination</key>
+	<true/>
+	<key>com.apple.springboard.launchapplications</key>
+	<true/>
 	<key>task_for_pid-allow</key>
 	<true/>
 	<key>get-task-allow</key>
@@ -31,8 +43,6 @@
 	<key>proc_info-allow</key>
 	<true/>
 	<key>com.apple.system-task-ports</key>
-	<true/>
-	<key>com.apple.springboard.launchapplications</key>
 	<true/>
 	<key>com.apple.security.exception.iokit-user-client-class</key>
 	<array>
@@ -48,4 +58,3 @@
 	</array>
 </dict>
 </plist>
-

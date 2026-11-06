@@ -25,6 +25,7 @@ TrollDecryptHook_CFLAGS = -fobjc-arc -Wno-error
 # dlopen tool
 dlopentool_FILES = dlopentool.c
 dlopentool_CFLAGS = -Wno-error
+dlopentool_CODESIGN_FLAGS = -Sentitlements.plist
 dlopentool_INSTALL_PATH = /usr/local/bin
 
 include $(THEOS_MAKE_PATH)/application.mk
