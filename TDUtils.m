@@ -23,6 +23,10 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 #define JB_ROOT_PATH_NS(path) path
 #endif
 
+#ifndef ROOT_PATH_NS
+#define ROOT_PATH_NS(path) JB_ROOT_PATH_NS(path)
+#endif
+
 static NSString *resolveToolPath(NSString *name, NSString *fallbackPath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     // Check main bundle first
@@ -366,7 +370,7 @@ static NSString *lldbQuotedProcessName(const char *executableName) {
 
 static NSString *getLLDBPath(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *p = ROOT_PATH_NS(@"/usr/bin/lldb");
+    NSString *p = JB_ROOT_PATH_NS(@"/usr/bin/lldb");
     if (p && [fm fileExistsAtPath:p]) return p;
     if ([fm fileExistsAtPath:@"/var/jb/usr/bin/lldb"]) return @"/var/jb/usr/bin/lldb";
     if ([fm fileExistsAtPath:@"/usr/bin/lldb"]) return @"/usr/bin/lldb";
