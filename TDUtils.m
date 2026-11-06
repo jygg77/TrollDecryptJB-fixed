@@ -576,7 +576,14 @@ void decryptAppWithLLDB(NSDictionary *app) {
         }
 
         NSLog(@"[trolldecrypt] Launching app via SpringBoard in suspended state...");
-        [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:YES];
+        if ([[UIApplication sharedApplication] respondsToSelector:@selector(launchApplicationWithIdentifier:suspended:)]) {
+            [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:YES];
+        }
+        // Also open via LSApplicationWorkspace to ensure app process starts on iOS 16
+        LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+        if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+            [workspace openApplicationWithBundleID:bundleID];
+        }
 
         // Wait for LLDB to catch the process
         BOOL caught = NO;
