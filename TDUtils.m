@@ -388,7 +388,13 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
         return 0;
     }
     NSString *scriptContent = [NSString stringWithFormat:@"process attach --name %@ --waitfor\n", quotedName];
-    [scriptContent writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSError *writeErr = nil;
+    BOOL wrote = [scriptContent writeToFile:scriptPath atomically:NO encoding:NSUTF8StringEncoding error:&writeErr];
+    if (!wrote) {
+        NSLog(@"[trolldecrypt] Failed to write script file at %@: %@", scriptPath, writeErr.localizedDescription);
+        scriptPath = @"/tmp/lldb_attach.txt";
+        [scriptContent writeToFile:scriptPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    }
     chmod([scriptPath UTF8String], 0666);
     NSString *logPath = getLogPath();
     [[NSFileManager defaultManager] removeItemAtPath:logPath error:nil];
