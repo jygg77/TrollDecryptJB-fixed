@@ -427,18 +427,19 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
         NSLog(@"[trolldecrypt] lldb spawned done, lldb PID: %d", lldb_pid);
         NSLog(@"[trolldecrypt] lldb output: %@", logPath);
         
-        waitForContentOfFileSync(logPath, @"process attach --name", 5.0);
-        usleep(500000); // 500ms
-        
-        // Verify lldb is still running
-        if (kill(lldb_pid, 0) == 0) {
-            NSLog(@"[trolldecrypt] lldb attached to '%s' (PID: %d)", executableName, target_pid);
-        } else {
-            NSLog(@"[trolldecrypt] lldb process died");
+        // Check if LLDB is alive; if not, read the output log
+        usleep(300000); // 300ms
+        if (kill(lldb_pid, 0) != 0) {
+            NSString *outLog = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"[trolldecrypt] lldb process died prematurely. Log: %@", outLog);
+            g_lastDecryptionError = [NSString stringWithFormat:@"LLDB exited immediately.\nOutput:\n%@", outLog ?: @"(no output)"];
             lldb_pid = 0;
+        } else {
+            NSLog(@"[trolldecrypt] lldb running and waiting for '%s' (PID: %d)", executableName, target_pid);
         }
     } else {
         NSLog(@"[trolldecrypt] fail to spawn lldb: %d", status);
+        g_lastDecryptionError = [NSString stringWithFormat:@"posix_spawn failed with error: %d (%s)\nPath: %@", status, strerror(status), lldbPathNS];
         lldb_pid = 0;
     }
     
@@ -568,8 +569,9 @@ void decryptAppWithLLDB(NSDictionary *app) {
         NSLog(@"[trolldecrypt] lldb --waitfor for '%@'...", binaryName);
         pid_t lldb_pid = attachLLDBToProcessByName([binaryName UTF8String], -1);
         if (lldb_pid <= 0) {
-            NSLog(@"[trolldecrypt] Failed to attach lldb");
-            showResultAlert(@"Error: LLDB", @"Failed to start LLDB attach process.", nil, NO);
+            NSLog(@"[trolldecrypt] Failed to attach lldb: %@", g_lastDecryptionError);
+            NSString *errMsg = g_lastDecryptionError ? [NSString stringWithFormat:@"Failed to start LLDB attach process.\n\nDetails:\n%@", g_lastDecryptionError] : @"Failed to start LLDB attach process.";
+            showResultAlert(@"Error: LLDB", errMsg, nil, NO);
             return;
         }
 
