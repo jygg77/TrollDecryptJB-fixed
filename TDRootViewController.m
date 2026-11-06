@@ -309,13 +309,17 @@
 
         alert = [UIAlertController alertControllerWithTitle:@"Decrypt" message:[NSString stringWithFormat:@"Choose decryption method for %@:", app[@"name"]] preferredStyle:UIAlertControllerStyleAlert];
         UIAlertAction *cancel = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-        UIAlertAction *decryptIPAAction = [UIAlertAction actionWithTitle:@"Decrypt IPA" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIAlertAction *decryptLLDBAction = [UIAlertAction actionWithTitle:@"Decrypt Higher iOS App (LLDB)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            decryptAppWithLLDB(app);
+        }];
+        UIAlertAction *decryptIPAAction = [UIAlertAction actionWithTitle:@"Decrypt IPA (Standard)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             decryptAllMachOInApp(app);
         }];
         UIAlertAction *decryptMainAction = [UIAlertAction actionWithTitle:@"Decrypt Main Binary Only" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             decryptAppWithFlexDecrypt(app);
         }];
 
+        [alert addAction:decryptLLDBAction];
         [alert addAction:decryptIPAAction];
         [alert addAction:decryptMainAction];
         [alert addAction:cancel];

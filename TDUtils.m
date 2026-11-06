@@ -4,6 +4,14 @@
 #import "SSZipArchive/SSZipArchive.h"
 #import "appstoretrollerKiller/TSUtil.h"
 #include <sys/stat.h>
+#include <spawn.h>
+
+extern char **environ;
+
+#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
+extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
+extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict, uid_t);
+extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict, uid_t);
 
 #if __has_include(<rootless.h>)
 #import <rootless.h>
@@ -303,7 +311,7 @@ NSArray *sysctl_ps(void) {
 }
 
 static NSString *getLogPath(void) {
-    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"lldb_output.log"];
+    return [docPath() stringByAppendingPathComponent:@"lldb_output.log"];
 }
 
 static BOOL waitForContentOfFileSync(NSString *filePath, NSString *content, NSTimeInterval timeout) {
@@ -357,8 +365,10 @@ static NSString *getLLDBPath(void) {
 }
 
 pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
+    setuid(0);
+    seteuid(0);
     NSLog(@"[trolldecrypt] Attaching lldb to executable: %s (PID: %d)", executableName, target_pid);
-    NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"lldb_attach.txt"];
+    NSString *scriptPath = [docPath() stringByAppendingPathComponent:@"lldb_attach.txt"];
     NSString *quotedName = lldbQuotedProcessName(executableName);
     if (!quotedName) {
         NSLog(@"[trolldecrypt] Invalid executable name for lldb attach");
@@ -366,6 +376,7 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
     }
     NSString *scriptContent = [NSString stringWithFormat:@"process attach --name %@ --waitfor\n", quotedName];
     [scriptContent writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    chmod([scriptPath UTF8String], 0666);
     NSString *logPath = getLogPath();
     [[NSFileManager defaultManager] removeItemAtPath:logPath error:nil];
 
@@ -382,14 +393,24 @@ pid_t attachLLDBToProcessByName(const char *executableName, pid_t target_pid) {
         NULL
     };
     
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    int persona_id = available_persona_id();
+    if (persona_id > 0) {
+        posix_spawnattr_set_persona_np(&attr, persona_id, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+        posix_spawnattr_set_persona_uid_np(&attr, 0);
+        posix_spawnattr_set_persona_gid_np(&attr, 0);
+    }
+    
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
 
-    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, [logPath UTF8String], O_WRONLY | O_CREAT | O_APPEND, 0666);
     
-    int status = posix_spawn(&lldb_pid, lldb_path, &actions, NULL, (char *const *)args, NULL);
+    int status = posix_spawn(&lldb_pid, lldb_path, &actions, &attr, (char *const *)args, environ);
     posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
     
     if (status == 0) {
         NSLog(@"[trolldecrypt] lldb spawned done, lldb PID: %d", lldb_pid);
@@ -545,30 +566,47 @@ void decryptAppWithLLDB(NSDictionary *app) {
         [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:YES];
 
         // Wait for LLDB to catch the process
-        BOOL caught = waitForContentOfFileSync(getLogPath(), @"Architecture set to", 30.0);
-        if (!caught) {
+        BOOL caught = NO;
+        NSTimeInterval startWait = [NSDate timeIntervalSinceReferenceDate];
+        while ([NSDate timeIntervalSinceReferenceDate] - startWait < 30.0) {
             NSString *logContent = [NSString stringWithContentsOfFile:getLogPath() encoding:NSUTF8StringEncoding error:nil];
-            if (![logContent containsString:@"stopped"] && ![logContent containsString:@"attached"]) {
-                NSLog(@"[trolldecrypt] Warning: Architecture set to not matched, log: %@", logContent);
-            }
-        }
-
-        // Get PID after LLDB caught it
-        pid_t pid = -1;
-        processes = sysctl_ps();
-        for (NSDictionary *process in processes) {
-            NSString *proc_name = process[@"proc_name"];
-            if ([proc_name isEqualToString:binaryName]) {
-                pid = [process[@"pid"] intValue];
-                NSLog(@"[trolldecrypt] Found app PID: %d (paused by LLDB)", pid);
+            if (logContent && ([logContent containsString:@"Architecture set to"] ||
+                               [logContent containsString:@"Process "] ||
+                               [logContent containsString:@"stopped"] ||
+                               [logContent containsString:@"attached"])) {
+                caught = YES;
+                NSLog(@"[trolldecrypt] LLDB attach confirmed in log: %@", logContent);
                 break;
             }
+            usleep(200000); // 200ms
+        }
+        if (!caught) {
+            NSString *logContent = [NSString stringWithContentsOfFile:getLogPath() encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"[trolldecrypt] Warning: LLDB log timeout, current content: %@", logContent);
+        }
+
+        // Get PID after LLDB caught it with robust retry loop (up to 15 seconds)
+        pid_t pid = -1;
+        NSTimeInterval startPidPoll = [NSDate timeIntervalSinceReferenceDate];
+        while ([NSDate timeIntervalSinceReferenceDate] - startPidPoll < 15.0) {
+            processes = sysctl_ps();
+            for (NSDictionary *process in processes) {
+                NSString *proc_name = process[@"proc_name"];
+                if ([proc_name isEqualToString:binaryName]) {
+                    pid = [process[@"pid"] intValue];
+                    NSLog(@"[trolldecrypt] Found app PID: %d (paused by LLDB)", pid);
+                    break;
+                }
+            }
+            if (pid > 0) break;
+            usleep(300000); // 300ms
         }
 
         if (pid <= 0) {
-            NSLog(@"[trolldecrypt] Failed to get PID for binary name: %@", binaryName);
+            NSString *logContent = [NSString stringWithContentsOfFile:getLogPath() encoding:NSUTF8StringEncoding error:nil];
+            NSLog(@"[trolldecrypt] Failed to get PID for binary name: %@. LLDB log: %@", binaryName, logContent);
             detachLLDB(lldb_pid);
-            showResultAlert(@"Error: -1", [NSString stringWithFormat:@"Failed to get PID for binary: %@", binaryName], nil, NO);
+            showResultAlert(@"Error: -1", [NSString stringWithFormat:@"Failed to get PID for binary: %@\n\nLLDB output:\n%@", binaryName, logContent ?: @"(no log)"], nil, NO);
             return;
         }
 
