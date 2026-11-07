@@ -75,6 +75,7 @@ static NSString *createSecureTempDir(NSString *prefix) {
     }
     NSString *result = [NSString stringWithUTF8String:dirPath];
     free(templateCString);
+    chmod([result fileSystemRepresentation], 0777);
     return result;
 }
 
@@ -734,12 +735,14 @@ NSArray *decryptedFileList(void) {
 
 NSString *docPath(void) {
     NSError * error = nil;
-    [[NSFileManager defaultManager] createDirectoryAtPath:@"/var/mobile/Documents/TrollDecrypt/decrypted" withIntermediateDirectories:YES attributes:nil error:&error];
+    NSString *p = @"/var/mobile/Documents/TrollDecrypt/decrypted";
+    [[NSFileManager defaultManager] createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:&error];
     if (error != nil) {
         NSLog(@"[trolldecrypt] error creating directory: %@", error);
     }
-
-    return @"/var/mobile/Documents/TrollDecrypt/decrypted";
+    chmod("/var/mobile/Documents/TrollDecrypt", 0777);
+    chmod([p fileSystemRepresentation], 0777);
+    return p;
 }
 
 void decryptAppWithPID(pid_t pid) {
@@ -1275,8 +1278,9 @@ BOOL isMachOFile(NSString *filePath) {
                 const uint8_t *bytes = (const uint8_t *)magicData.bytes;
                 uint32_t magic = *(uint32_t *)bytes;
                 
-                // Check for mach-o magic numbers
-                if (magic == 0xfeedface || magic == 0xfeedfacf || magic == 0xcffaedfe || magic == 0xcefaedfe) {
+                // Check for mach-o magic numbers (including FAT binary magic)
+                if (magic == 0xfeedface || magic == 0xfeedfacf || magic == 0xcffaedfe || magic == 0xcefaedfe ||
+                    magic == 0xcafebabe || magic == 0xbebafeca || magic == 0xcafebabf || magic == 0xbfbafeca) {
                     return YES;
                 }
             }
@@ -1294,6 +1298,7 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
     NSString *fileName = [filePath lastPathComponent];
     NSString *outputDir = [outputPath stringByDeletingLastPathComponent];
     [fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:nil];
+    chmod([outputDir fileSystemRepresentation], 0777);
     
     // Ensure flexdecrypt_bin exists and is executable
     NSString *flexdecryptPath = resolveToolPath(@"flexdecrypt_bin", @"/Applications/TrollDecrypt.app/flexdecrypt_bin");
@@ -1316,8 +1321,8 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
         spawnRoot(dlopenPath, @[filePath], &dlopenStdOut, &dlopenStdErr);
     }
     
-    // Use an isolated temporary destination path for flexdecrypt output
-    NSString *tempDecryptedFile = [outputDir stringByAppendingPathComponent:[NSString stringWithFormat:@".td_dec_%@_%u", fileName, arc4random_uniform(100000)]];
+    // Use an isolated temporary destination path in /tmp for guaranteed write access
+    NSString *tempDecryptedFile = [NSString stringWithFormat:@"/tmp/.td_dec_%@_%u", fileName, arc4random_uniform(1000000)];
     [fm removeItemAtPath:tempDecryptedFile error:nil];
     
     // Helper block to test if a candidate decrypted binary is valid and install it to outputPath

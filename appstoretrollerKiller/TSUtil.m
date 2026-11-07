@@ -75,7 +75,8 @@ int available_persona_id()
 
     int current_persona_id = info.persona_id;
 
-    for (int t = 1; t <= PERSONA_TYPE_MAX; t++)
+    // Never pick PERSONA_GUEST (1) which restricts permissions
+    for (int t = PERSONA_TYPE_MAX; t >= 2; t--)
     {
         uid_t personas[128] = {0};
         size_t npersonas = 128;
@@ -142,12 +143,16 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 
 	posix_spawnattr_t attr;
 	posix_spawnattr_init(&attr);
-    int persona_id = available_persona_id();
-    if (persona_id > 0)
+    // On jailbreak, if already running as root or effective root, do NOT override persona
+    if (getuid() != 0 && geteuid() != 0)
     {
-        posix_spawnattr_set_persona_np(&attr, persona_id, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-        posix_spawnattr_set_persona_uid_np(&attr, 0);
-        posix_spawnattr_set_persona_gid_np(&attr, 0);
+        int persona_id = available_persona_id();
+        if (persona_id > 0)
+        {
+            posix_spawnattr_set_persona_np(&attr, persona_id, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+            posix_spawnattr_set_persona_uid_np(&attr, 0);
+            posix_spawnattr_set_persona_gid_np(&attr, 0);
+        }
     }
 
 	posix_spawn_file_actions_t action;
