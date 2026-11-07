@@ -636,7 +636,7 @@ void decryptAppWithLLDB(NSDictionary *app) {
 }
 
 void decryptApp(NSDictionary *app) {
-    decryptAppWithLLDB(app);
+    decryptAllMachOInApp(app);
 }
 
 void decryptAppWithFlexDecrypt(NSDictionary *app) {
@@ -678,8 +678,7 @@ void decryptAppWithFlexDecrypt(NSDictionary *app) {
             [root presentViewController:alertController animated:YES completion:nil];
         });
 
-        // Kill running instance of the app if any to avoid collision
-        killall(binaryName, NO);
+        // Do not kill running instance of target app to preserve FairPlay kernel context
 
         NSString *cleanName = sanitizeFilename(name);
         NSString *cleanVersion = sanitizeFilename(version);
@@ -1376,11 +1375,11 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
         [outputPath stringByAppendingString:@".decrypted"]
     ];
     
-    // Attempt 1: flexdecrypt <filePath> --output <tempDecryptedFile>
+    // Attempt 1: flexdecrypt <filePath> <tempDecryptedFile> (positional arguments)
     NSString *stdOut1 = nil;
     NSString *stdErr1 = nil;
-    NSLog(@"[trolldecrypt] Attempt 1: %@ %@ --output %@", flexdecryptPath, filePath, tempDecryptedFile);
-    int res1 = spawnRoot(flexdecryptPath, @[filePath, @"--output", tempDecryptedFile], &stdOut1, &stdErr1);
+    NSLog(@"[trolldecrypt] Attempt 1 (positional): %@ %@ %@", flexdecryptPath, filePath, tempDecryptedFile);
+    int res1 = spawnRoot(flexdecryptPath, @[filePath, tempDecryptedFile], &stdOut1, &stdErr1);
     NSLog(@"[trolldecrypt] Attempt 1 exited with %d (stdout: %@, stderr: %@)", res1, stdOut1, stdErr1);
     
     if (checkAndInstall(tempDecryptedFile)) return YES;
@@ -1392,11 +1391,11 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
         if (checkAndInstall(cand)) return YES;
     }
     
-    // Attempt 2: flexdecrypt --output <tempDecryptedFile> <filePath> (option before argument)
+    // Attempt 2: flexdecrypt <filePath> (default output without second argument)
     NSString *stdOut2 = nil;
     NSString *stdErr2 = nil;
-    NSLog(@"[trolldecrypt] Attempt 2: %@ --output %@ %@", flexdecryptPath, tempDecryptedFile, filePath);
-    int res2 = spawnRoot(flexdecryptPath, @[@"--output", tempDecryptedFile, filePath], &stdOut2, &stdErr2);
+    NSLog(@"[trolldecrypt] Attempt 2 (default output): %@ %@", flexdecryptPath, filePath);
+    int res2 = spawnRoot(flexdecryptPath, @[filePath], &stdOut2, &stdErr2);
     NSLog(@"[trolldecrypt] Attempt 2 exited with %d (stdout: %@, stderr: %@)", res2, stdOut2, stdErr2);
     
     if (checkAndInstall(tempDecryptedFile)) return YES;
@@ -1408,11 +1407,11 @@ BOOL decryptMachOFile(NSString *filePath, NSString *outputPath) {
         if (checkAndInstall(cand)) return YES;
     }
     
-    // Attempt 3: flexdecrypt <filePath> (default output without --output flag)
+    // Attempt 3: flexdecrypt <filePath> --output <tempDecryptedFile> (flag fallback)
     NSString *stdOut3 = nil;
     NSString *stdErr3 = nil;
-    NSLog(@"[trolldecrypt] Attempt 3: %@ %@", flexdecryptPath, filePath);
-    int res3 = spawnRoot(flexdecryptPath, @[filePath], &stdOut3, &stdErr3);
+    NSLog(@"[trolldecrypt] Attempt 3 (--output flag): %@ %@ --output %@", flexdecryptPath, filePath, tempDecryptedFile);
+    int res3 = spawnRoot(flexdecryptPath, @[filePath, @"--output", tempDecryptedFile], &stdOut3, &stdErr3);
     NSLog(@"[trolldecrypt] Attempt 3 exited with %d (stdout: %@, stderr: %@)", res3, stdOut3, stdErr3);
     
     NSString *parsedPath3 = parseStdoutPath(stdOut3);
